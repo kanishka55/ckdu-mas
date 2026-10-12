@@ -28,6 +28,15 @@ risk_record (inform)             RiskScoring -> Coordinator, Alert, Hotspot
     tier:str          risk tier label from the published WQI classes
     drivers:list      parameter names that contributed most to the score
 
+well_risk (inform)               RiskScoring -> Hotspot  (per-well detail behind one risk_record)
+    month_index:int, month:int (calendar 1-12), ds_division:str, district:str
+    ckdu_prevalence_class:str  Cooray et al.'s class for the division (for the alignment check)
+    source:str        "real" | "synthetic"
+    wells:list        one dict per scored well: well_id:str, wqi:number|null, tier:str,
+                      q:{parameter: qi} (quality rating per WQI parameter present, see
+                      src/core/wqi.py). Wells rejected for unusable values are not included.
+    Added by Member B (Function 2) for the HotspotAgent; additive, no existing type changed.
+
 cfp (cfp)                        Coordinator -> Villages
     month_index:int, round:int
     resource:str      "RO_unit" | "bowser"
@@ -99,6 +108,18 @@ SCHEMAS: dict[str, tuple[frozenset[str], dict[str, tuple[type, ...]]]] = {
             "wqi": _NUM + (type(None),),
             "tier": (str,),
             "drivers": (list,),
+        },
+    ),
+    "well_risk": (
+        frozenset({INFORM}),
+        {
+            "month_index": (int,),
+            "month": (int,),
+            "ds_division": (str,),
+            "district": (str,),
+            "ckdu_prevalence_class": (str,),
+            "source": (str,),
+            "wells": (list,),
         },
     ),
     "cfp": (
