@@ -1,0 +1,4 @@
+month,resource,ds_division,round,winning_bid,method
+1,bowser,Fixture A,1,0.9,contract_net
+1,bowser,Fixture B,1,0.8,equal_split
+1,bowser,Fixture C,1,0.7,first_come
