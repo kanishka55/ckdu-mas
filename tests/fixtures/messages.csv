@@ -1,0 +1,10 @@
+timestamp,sender,receiver,performative,thread_id,payload
+2026-01-01T00:00:00+00:00,WellMonitorAgent,RiskScoringAgent,inform,risk-a-1,"{""event_type"":""risk_input_received"",""ds_division"":""Fixture A"",""month"":1,""source"":""synthetic""}"
+2026-01-01T00:01:00+00:00,WellMonitorAgent,RiskScoringAgent,inform,risk-b-1,"{""event_type"":""risk_input_received"",""ds_division"":""Fixture B"",""month"":1,""source"":""synthetic""}"
+2026-01-01T00:01:15+00:00,AlertAgent,Fixture A,inform,alert:Fixture A:1,"{""event_type"":""alert_issued"",""ds_division"":""Fixture A"",""month"":1,""tier"":""Poor"",""text"":""Illustrative synthetic risk-indicator alert."",""source"":""synthetic"",""hotspot"":false}"
+2026-01-01T00:01:20+00:00,AlertAgent,AlertAgent,,alert:Fixture B:1:suppressed,"{""event_type"":""alert_suppressed"",""ds_division"":""Fixture B"",""month"":1,""tier"":""Good"",""source"":""synthetic"",""hotspot"":false,""reason"":""unchanged_state""}"
+2026-01-01T01:00:00+00:00,Coordinator,Village A,cfp,cn-thread,"{""thread"":""cn-thread"",""month"":1,""resource"":""bowser"",""n_available"":1,""round"":1,""deadline_s"":2.0}"
+2026-01-01T01:00:00.050+00:00,Coordinator,Village A,cfp,cn-thread,"{""thread"":""cn-thread"",""month"":1,""resource"":""bowser"",""n_available"":1,""round"":1,""deadline_s"":2.0}"
+2026-01-01T01:00:00.100+00:00,Village A,Coordinator,propose,cn-thread,"{""bid"":0.8}"
+2026-01-01T01:00:02+00:00,Coordinator,Village A,cfp,cn-thread,"{""thread"":""cn-thread"",""month"":1,""resource"":""bowser"",""n_available"":1,""round"":2,""deadline_s"":2.0}"
+2026-01-01T01:00:03+00:00,Coordinator,Village A,inform,cn-thread,"{}"
