@@ -1,8 +1,8 @@
 {
-  "fixture_note": "Illustrative synthetic-shaped test data only; not observations or scientific validation.",
+  "fixture_note": "Synthetic-shaped illustrative evaluator inputs only; not observations, team outputs, or scientific validation.",
   "records": [
-    {"ds_division": "Fixture A", "month": 1, "wqi": 120.0, "tier": "Poor", "drivers": {"synthetic_fixture": 1.0}, "n_wells": 2, "source": "synthetic"},
-    {"ds_division": "Fixture B", "month": 1, "wqi": 75.0, "tier": "Good", "drivers": {"synthetic_fixture": 0.5}, "n_wells": 2, "source": "synthetic"},
-    {"ds_division": "Fixture C", "month": 1, "wqi": 40.0, "tier": "Excellent", "drivers": {"synthetic_fixture": 0.1}, "n_wells": 1, "source": "synthetic"}
+    {"type": "risk_record", "month_index": 0, "ds_division": "Fixture A", "wqi": 120.0, "tier": "Poor", "drivers": ["synthetic_fixture"]},
+    {"type": "risk_record", "month_index": 0, "ds_division": "Fixture B", "wqi": 75.0, "tier": "Good", "drivers": ["synthetic_fixture"]},
+    {"type": "risk_record", "month_index": 0, "ds_division": "Fixture C", "wqi": 40.0, "tier": "Excellent", "drivers": ["synthetic_fixture"]}
   ]
 }

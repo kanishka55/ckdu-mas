@@ -5,10 +5,20 @@ Weight wi: TDS,weight,5,,"Cooray et al. 2019, Sec 2.3","Maximum weight (5) state
 Weight wi: F,weight,5,,"Cooray et al. 2019, Sec 2.3",
 Weight wi: NO3,weight,5,,"Cooray et al. 2019, Sec 2.3",
 Weight wi: DOC,weight,5,,"Cooray et al. 2019, Sec 2.3",
-Weight wi: pH; hardness; alkalinity; Ca; Mg; Na; Cl; SO4; Fe,weight,TO_FILL,,"Cooray et al. 2019, Supplementary Table S1","Not available in the article text. Download supplementary file from https://www.mdpi.com/1660-4601/16/10/1698/s1 (also holds the SLS values Si used)"
+Weight wi: pH,weight,4,,"Cooray et al. 2019, Supplementary Table S1","Supplement retrieved via Europe PMC (PMC6572134); all 13 weights sum to 48"
+Weight wi: hardness,weight,2,,"Cooray et al. 2019, Supplementary Table S1","Total hardness"
+Weight wi: alkalinity,weight,3,,"Cooray et al. 2019, Supplementary Table S1","Total alkalinity"
+Weight wi: Ca,weight,2,,"Cooray et al. 2019, Supplementary Table S1",
+Weight wi: Mg,weight,2,,"Cooray et al. 2019, Supplementary Table S1",
+Weight wi: Na,weight,3,,"Cooray et al. 2019, Supplementary Table S1",
+Weight wi: Cl,weight,4,,"Cooray et al. 2019, Supplementary Table S1",
+Weight wi: SO4,weight,4,,"Cooray et al. 2019, Supplementary Table S1",
+Weight wi: Fe,weight,4,,"Cooray et al. 2019, Supplementary Table S1",
 WQI class: Excellent,class,<50,,"Cooray et al. 2019, Table 2 and Conclusions","Can be consumed without treatment"
 WQI class: Good,class,50-100,,"Cooray et al. 2019, Table 2",
-WQI class: Poor,class,100-200,,"Cooray et al. 2019, Table 2","Their samples never exceeded 200 so no further classes were used; check Table S2 for classes above 200"
+WQI class: Poor,class,100-200,,"Cooray et al. 2019, Table 2 and Supplementary Table S2","Their samples never exceeded 200; the two classes above 200 come from Table S2"
+WQI class: Very Poor,class,200-300,,"Cooray et al. 2019, Supplementary Table S2","Very poor water"
+WQI class: Unsuitable,class,>300,,"Cooray et al. 2019, Supplementary Table S2","Water unsuitable for drinking"
 WQI reference point,note,90,,"Cooray et al. 2019, Sec 3.4","A sample exactly meeting the Sri Lankan standard scores 90"
 Fluoride limit (SLS 614:2013),threshold,1.0,mg/L,"Cooray et al. 2019, Figure 3 caption","Maximum allowable F in potable water per SLS 614:2013"
 Fluoride limit (WHO 1994 tropical),threshold,0.6,mg/L,"Nikagolla et al. 2020 (Sci Total Environ 745:140896)","Cited by that paper as the safe limit for tropical countries"
@@ -17,3 +27,16 @@ Nitrate maximum allowable,threshold,50,mg/L,"Nikagolla et al. 2020","As stated i
 Nitrite WHO long-term guideline,threshold,0.2,mg/L,"Nikagolla et al. 2020",
 Lead limit,threshold,0.01,mg/L,"Nikagolla et al. 2020","As stated in the paper"
 DOC natural-groundwater level,threshold,4,mg/L,"Cooray et al. 2019, Sec 3.2","Natural unpolluted groundwater typically below this; above suggests anthropogenic influence"
+Standard Si: pH,standard,8.5,,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)","Table S1 gives the range 6.5-8.5; Eq. 2 needs one Si, so the upper limit is used (project interpretation, see docs/wqi_method.md)"
+Standard Si: TDS,standard,500,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)",
+Standard Si: hardness,standard,250,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)","Total hardness as CaCO3"
+Standard Si: alkalinity,standard,200,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)","Total alkalinity as CaCO3"
+Standard Si: Ca,standard,100,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)",
+Standard Si: Mg,standard,30,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)",
+Standard Si: Na,standard,200,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)",
+Standard Si: F,standard,1,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)",
+Standard Si: Cl,standard,250,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)",
+Standard Si: SO4,standard,250,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)",
+Standard Si: NO3,standard,50,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)",
+Standard Si: Fe,standard,0.3,mg/L,"Cooray et al. 2019, Supplementary Table S1 (SLS 614:2013)","Table S3 gives Fe in ug/L against SLS 300 ug/L (the same limit)"
+Standard Si: DOC,standard,4,mg/L,"Cooray et al. 2019, Supplementary Table S1","Printed as 4* with no SLS or WHO value: not a regulatory limit, the natural-groundwater level from Sec 3.2"
