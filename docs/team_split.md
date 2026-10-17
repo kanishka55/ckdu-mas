@@ -45,7 +45,9 @@ Brief: [`docs/tasks/member_a_data_and_villages.md`](tasks/member_a_data_and_vill
 - `src/sim/load_data.py` — load the raw CSVs and `data/processed/synthetic_wells.csv` into tidy frames.
 - `src/core/wells.py` — well/village record schema, validation, real-vs-synthetic guard.
 - `src/core/bidding.py` — the bid function (pure, tested). First draft from START_HERE:
-  `need = risk × population / distance_to_depot`.
+  `need = risk × population / distance_to_depot`. Current version (2026-10-17):
+  `bid(risk, population) = risk × population`, bid only when tier is Poor or worse; distance is the
+  coordinator's delivery cost. See `docs/data_assumptions.md`.
 - `src/agents/well_monitor.py` — WellMonitorAgent: ingests monthly readings per village.
 - `src/agents/village.py` — VillageAgent (10–15 instances): holds local well data, computes its bid,
   replies to CFPs with propose/refuse.

@@ -1,237 +1,256 @@
-"""Shared message vocabulary and provisional payload contracts.
+"""Message ontology: the single source of truth for every message body exchanged between agents.
 
-The contracts below use fields explicitly named in the project task briefs. The
-briefs do not define payload shapes for every message family; those entries are
-marked provisional and must be reviewed by Members A, B, and C before the
-ontology is treated as frozen. Message bodies exclude the SPADE performative;
-the performative is supplied separately to :func:`validate`.
+Every message body is a JSON object with a ``type`` field naming one of the schemas below.
+Each type is only legal under specific FIPA performatives. Agents call ``encode`` before sending
+and ``decode`` after receiving; both validate, so a schema mismatch fails at the sender instead of
+silently corrupting a negotiation in week 9.
 
-This module has no SPADE dependency so agents and tests can share the contract.
+Pure module: no SPADE imports.
+
+Wording rule for every human-readable string carried in a body (``reason``, ``message``): this is a
+risk-indicator tool built on published water-quality research. It never diagnoses CKDu and never
+claims water chemistry causes CKDu.
+
+Schemas
+-------
+month_tick (inform)              Clock -> all
+    month_index:int   simulated month counter, 0-based
+    month:int         calendar month 1-12
+    season:str        "Wet" | "Dry" (see src/core/wells.py MONTH_TO_SEASON)
+
+well_readings (inform)           WellMonitor -> RiskScoring
+    month_index:int, ds_division:str, source:str ("real" | "synthetic")
+    readings:list     list of dicts, one per well, keys = wells.READING_COLUMNS
+
+risk_record (inform)             RiskScoring -> Coordinator, Alert, Hotspot
+    month_index:int, ds_division:str
+    wqi:number|null   null when the WQI cannot be computed (missing weights or parameters)
+    tier:str          risk tier label from the published WQI classes
+    drivers:list      parameter names that contributed most to the score
+
+well_risk (inform)               RiskScoring -> Hotspot  (per-well detail behind one risk_record)
+    month_index:int, month:int (calendar 1-12), ds_division:str, district:str
+    ckdu_prevalence_class:str  Cooray et al.'s class for the division (for the alignment check)
+    source:str        "real" | "synthetic"
+    wells:list        one dict per scored well: well_id:str, wqi:number|null, tier:str,
+                      q:{parameter: qi} (quality rating per WQI parameter present, see
+                      src/core/wqi.py). Wells rejected for unusable values are not included.
+    Added by Member B (Function 2) for the HotspotAgent; additive, no existing type changed.
+
+cfp (cfp)                        Coordinator -> Villages
+    month_index:int, round:int
+    resource:str      "RO_unit" | "bowser"
+    units_available:int
+    deadline_s:number seconds the coordinator will wait for proposals
+
+propose (propose)                Village -> Coordinator
+    month_index:int, round:int, ds_division:str
+    bid:number        raw bid from src/core/bidding.bid; the coordinator normalises across villages
+    risk_tier:str, population:int
+
+refuse (refuse)                  Village -> Coordinator
+    month_index:int, round:int, ds_division:str, reason:str
+
+accept_proposal (accept-proposal)  Coordinator -> Village
+    month_index:int, round:int, resource:str, units:int
+
+reject_proposal (reject-proposal)  Coordinator -> Village
+    month_index:int, round:int, reason:str
+
+inform_done (inform)             Village -> Coordinator, after an accepted proposal
+    month_index:int, round:int, ds_division:str, resource:str, units:int
+
+failure (failure)                Village -> Coordinator, could not take the allocation
+    month_index:int, round:int, ds_division:str, reason:str
+
+alert (inform)                   Alert -> village health officer
+    month_index:int, ds_division:str, tier:str, hotspot:bool, message:str
 """
-
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
 from typing import Any
 
+# FIPA performatives used in this system
+CFP = "cfp"
+PROPOSE = "propose"
+REFUSE = "refuse"
+ACCEPT_PROPOSAL = "accept-proposal"
+REJECT_PROPOSAL = "reject-proposal"
+INFORM = "inform"
+FAILURE = "failure"
 
 PERFORMATIVES = frozenset(
-    {
-        "cfp",
-        "propose",
-        "refuse",
-        "accept-proposal",
-        "reject-proposal",
-        "inform",
-        "failure",
-    }
+    {CFP, PROPOSE, REFUSE, ACCEPT_PROPOSAL, REJECT_PROPOSAL, INFORM, FAILURE}
 )
 
-# Message families and FIPA performatives are separate concepts. This mapping
-# is intentionally explicit so an alert message can use the existing
-# ``inform`` performative without adding a new FIPA performative. The mapping
-# remains provisional pending team review.
-MESSAGE_PERFORMATIVES = {"alert": "inform"}
+RESOURCES = frozenset({"RO_unit", "bowser"})
+SEASONS = frozenset({"Wet", "Dry"})
+SOURCES = frozenset({"real", "synthetic"})
 
-# Each entry documents required fields and their expected Python/JSON value
-# types. Empty provisional entries are intentionally not a claim that the
-# corresponding protocol messages must have empty bodies; they prevent callers
-# from silently inventing fields until the owners agree on the payload.
-SCHEMAS: dict[str, dict[str, Any]] = {
-    "cfp": {
-        "required": {
-            "thread": str,
-            "month": int,
-            "resource": str,
-            "n_available": int,
-            "round": int,
-            "deadline_s": (int, float),
+_NUM = (int, float)
+
+# type -> (allowed performatives, {field: accepted python types})
+SCHEMAS: dict[str, tuple[frozenset[str], dict[str, tuple[type, ...]]]] = {
+    "month_tick": (
+        frozenset({INFORM}),
+        {"month_index": (int,), "month": (int,), "season": (str,)},
+    ),
+    "well_readings": (
+        frozenset({INFORM}),
+        {"month_index": (int,), "ds_division": (str,), "source": (str,), "readings": (list,)},
+    ),
+    "risk_record": (
+        frozenset({INFORM}),
+        {
+            "month_index": (int,),
+            "ds_division": (str,),
+            "wqi": _NUM + (type(None),),
+            "tier": (str,),
+            "drivers": (list,),
         },
-        "optional": {},
-        "provisional": False,
-        "notes": "Fields follow Member C's published CFP example.",
-    },
-    "propose": {
-        "required": {"bid": (int, float)},
-        "optional": {},
-        "provisional": True,
-        "notes": "A bid is documented; its payload shape is not. `bid` is a provisional minimal shape.",
-    },
-    "refuse": {
-        "required": {},
-        "optional": {},
-        "provisional": True,
-        "notes": "Refusal is required; no refusal payload fields are documented.",
-    },
-    "accept-proposal": {
-        "required": {},
-        "optional": {},
-        "provisional": True,
-        "notes": "Performatives are documented; payload fields are not.",
-    },
-    "reject-proposal": {
-        "required": {},
-        "optional": {},
-        "provisional": True,
-        "notes": "Performatives are documented; payload fields are not.",
-    },
-    "inform": {
-        "required": {},
-        "optional": {},
-        "provisional": True,
-        "notes": "Confirmation is documented; its payload fields are not.",
-    },
-    "failure": {
-        "required": {},
-        "optional": {},
-        "provisional": True,
-        "notes": "Failure handling is documented; its payload fields are not.",
-    },
-    # These are message types, not FIPA performatives. They can be validated by
-    # passing their schema key to validate; their performative mapping remains
-    # an integration decision.
-    "month_tick": {
-        "required": {"month": int},
-        "optional": {},
-        "provisional": True,
-        "notes": "Month number is explicit in the briefs; sender/recipient framing is not.",
-    },
-    "well_reading": {
-        "required": {
-            "well_id": str,
-            "ds_division": str,
-            "district": str,
-            "ckdu_prevalence_class": str,
-            "month": int,
-            "season": str,
-            "source": str,
-            "pH": (int, float),
-            "EC_uS_cm": (int, float),
-            "alkalinity_mg_L": (int, float),
-            "hardness_mg_L": (int, float),
-            "F_mg_L": (int, float),
-            "DOC_mg_L": (int, float),
-            "Cl_mg_L": (int, float),
-            "SO4_mg_L": (int, float),
-            "Fe_ug_L": (int, float),
+    ),
+    "well_risk": (
+        frozenset({INFORM}),
+        {
+            "month_index": (int,),
+            "month": (int,),
+            "ds_division": (str,),
+            "district": (str,),
+            "ckdu_prevalence_class": (str,),
+            "source": (str,),
+            "wells": (list,),
         },
-        "optional": {},
-        "provisional": True,
-        "notes": "Uses Member A's stated reading columns; A's current CSV has no month field.",
-    },
-    "risk_record": {
-        "required": {
-            "ds_division": str,
-            "month": int,
-            "wqi": (int, float),
-            "tier": str,
-            "drivers": dict,
-            "n_wells": int,
-            "source": str,
+    ),
+    "cfp": (
+        frozenset({CFP}),
+        {
+            "month_index": (int,),
+            "round": (int,),
+            "resource": (str,),
+            "units_available": (int,),
+            "deadline_s": _NUM,
         },
-        "optional": {},
-        "provisional": True,
-        "notes": "Fields follow Member B's published risk_record example.",
-    },
-    "alert": {
-        "required": {
-            "event_type": str,
-            "ds_division": str,
-            "month": int,
-            "tier": str,
-            "text": str,
-            "source": str,
-            "hotspot": bool,
+    ),
+    "propose": (
+        frozenset({PROPOSE}),
+        {
+            "month_index": (int,),
+            "round": (int,),
+            "ds_division": (str,),
+            "bid": _NUM,
+            "risk_tier": (str,),
+            "population": (int,),
         },
-        "optional": {},
-        "provisional": True,
-        "allowed_values": {
-            "event_type": {"alert_issued"},
-            "tier": {"Excellent", "Good", "Poor"},
-            "source": {"real", "synthetic", "mixed"},
+    ),
+    "refuse": (
+        frozenset({REFUSE}),
+        {"month_index": (int,), "round": (int,), "ds_division": (str,), "reason": (str,)},
+    ),
+    "accept_proposal": (
+        frozenset({ACCEPT_PROPOSAL}),
+        {"month_index": (int,), "round": (int,), "resource": (str,), "units": (int,)},
+    ),
+    "reject_proposal": (
+        frozenset({REJECT_PROPOSAL}),
+        {"month_index": (int,), "round": (int,), "reason": (str,)},
+    ),
+    "inform_done": (
+        frozenset({INFORM}),
+        {
+            "month_index": (int,),
+            "round": (int,),
+            "ds_division": (str,),
+            "resource": (str,),
+            "units": (int,),
         },
-        "notes": "Provisional alert payload; inform mapping is explicit in MESSAGE_PERFORMATIVES.",
-    },
-    "alert_suppression": {
-        "required": {
-            "event_type": str,
-            "ds_division": str,
-            "month": int,
-            "tier": str,
-            "source": str,
-            "hotspot": bool,
-            "reason": str,
+    ),
+    "failure": (
+        frozenset({FAILURE}),
+        {"month_index": (int,), "round": (int,), "ds_division": (str,), "reason": (str,)},
+    ),
+    "alert": (
+        frozenset({INFORM}),
+        {
+            "month_index": (int,),
+            "ds_division": (str,),
+            "tier": (str,),
+            "hotspot": (bool,),
+            "message": (str,),
         },
-        "optional": {},
-        "provisional": True,
-        "allowed_values": {
-            "event_type": {"alert_suppressed"},
-            "tier": {"Excellent", "Good", "Poor"},
-            "source": {"real", "synthetic", "mixed"},
-            "reason": {"duplicate_same_state_same_month", "unchanged_state"},
-        },
-        "notes": "Internal audit record, not an alert message to the village health officer.",
-    },
+    ),
 }
 
 
-def validate_message(message_type: str, body: Mapping[str, Any]) -> None:
-    """Raise ``ValueError`` unless *body* matches a strict message-family schema."""
-    _validate_schema(message_type, body)
+class SchemaError(ValueError):
+    """Raised when a message body does not match its documented schema."""
 
 
-def validate(performative: str, body: Mapping[str, Any]) -> None:
-    """Raise ``ValueError`` unless *body* matches the selected strict schema.
+def validate(performative: str, body: dict[str, Any]) -> None:
+    """Raise SchemaError if ``body`` is not a legal message for ``performative``."""
+    if performative not in PERFORMATIVES:
+        raise SchemaError(f"unknown performative {performative!r}")
+    if not isinstance(body, dict):
+        raise SchemaError(f"body must be a dict, got {type(body).__name__}")
+    msg_type = body.get("type")
+    if msg_type not in SCHEMAS:
+        raise SchemaError(f"unknown message type {msg_type!r}")
+    allowed, fields = SCHEMAS[msg_type]
+    if performative not in allowed:
+        raise SchemaError(f"type {msg_type!r} is not allowed with performative {performative!r}")
 
-    The historical parameter name is retained for compatibility. It accepts
-    either a FIPA performative or a message-family key in :data:`SCHEMAS`.
-    Prefer :func:`validate_message` for message-family payloads. Bodies exclude
-    a duplicate ``performative`` field.
-    """
-    _validate_schema(performative, body)
-
-
-def _validate_schema(schema_name: str, body: Mapping[str, Any]) -> None:
-    if schema_name not in SCHEMAS:
-        raise ValueError(f"Unknown message schema/performative: {schema_name!r}")
-    if not isinstance(body, Mapping):
-        raise ValueError("Message body must be a JSON object (mapping)")
-
-    schema = SCHEMAS[schema_name]
-    required: dict[str, Any] = schema["required"]
-    optional: dict[str, Any] = schema["optional"]
-    missing = set(required) - set(body)
-    unexpected = set(body) - set(required) - set(optional)
-    problems: list[str] = []
+    present = set(body) - {"type"}
+    missing = set(fields) - present
+    extra = present - set(fields)
     if missing:
-        problems.append(f"missing fields: {', '.join(sorted(missing))}")
-    if unexpected:
-        problems.append(f"unexpected fields: {', '.join(sorted(unexpected))}")
-    for field, expected in {**required, **optional}.items():
-        if field not in body:
-            continue
-        # bool is an int subclass in Python, but is not a meaningful numeric
-        # reading, month, bid, or deadline here.
-        value = body[field]
-        if (isinstance(value, bool) and expected is not bool) or not isinstance(value, expected):
-            expected_names = (
-                " or ".join(t.__name__ for t in expected)
-                if isinstance(expected, tuple)
-                else expected.__name__
+        raise SchemaError(f"{msg_type}: missing fields {sorted(missing)}")
+    if extra:
+        raise SchemaError(f"{msg_type}: unexpected fields {sorted(extra)}")
+
+    for name, types in fields.items():
+        value = body[name]
+        # bool is a subclass of int; reject it wherever a number is expected
+        if isinstance(value, bool) and bool not in types:
+            raise SchemaError(f"{msg_type}.{name}: expected {_names(types)}, got bool")
+        if not isinstance(value, types):
+            raise SchemaError(
+                f"{msg_type}.{name}: expected {_names(types)}, got {type(value).__name__}"
             )
-            problems.append(f"field {field!r} must be {expected_names}")
-    if schema_name == "cfp" and not problems:
-        if body["month"] < 1 or body["n_available"] < 0 or body["round"] < 1:
-            problems.append("cfp month/round must be positive and n_available non-negative")
-        if body["deadline_s"] <= 0:
-            problems.append("cfp deadline_s must be positive")
-        if body["resource"] not in {"ro_unit", "bowser"}:
-            problems.append("cfp resource must be 'ro_unit' or 'bowser'")
-    allowed_values = schema.get("allowed_values", {})
-    for field, allowed in allowed_values.items():
-        if field in body and body[field] not in allowed:
-            problems.append(f"field {field!r} must be one of {sorted(allowed)}")
-    if schema_name in {"alert", "alert_suppression"} and "month" in body and body["month"] < 1:
-        problems.append("month must be positive")
-    if problems:
-        raise ValueError(f"Invalid {schema_name!r} body: " + "; ".join(problems))
+
+    _check_values(msg_type, body)
+
+
+def _check_values(msg_type: str, body: dict[str, Any]) -> None:
+    if "resource" in body and body["resource"] not in RESOURCES:
+        raise SchemaError(f"{msg_type}.resource must be one of {sorted(RESOURCES)}")
+    if "season" in body and body["season"] not in SEASONS:
+        raise SchemaError(f"{msg_type}.season must be one of {sorted(SEASONS)}")
+    if "source" in body and body["source"] not in SOURCES:
+        raise SchemaError(f"{msg_type}.source must be one of {sorted(SOURCES)}")
+    if "month" in body and not 1 <= body["month"] <= 12:
+        raise SchemaError(f"{msg_type}.month must be 1-12")
+    for name in ("month_index", "round", "units_available", "units", "population"):
+        if name in body and body[name] < 0:
+            raise SchemaError(f"{msg_type}.{name} must be >= 0")
+    if "deadline_s" in body and body["deadline_s"] <= 0:
+        raise SchemaError(f"{msg_type}.deadline_s must be > 0")
+
+
+def _names(types: tuple[type, ...]) -> str:
+    return "|".join("null" if t is type(None) else t.__name__ for t in types)
+
+
+def encode(performative: str, body: dict[str, Any]) -> str:
+    """Validate and serialise a body to the JSON string sent as the message body."""
+    validate(performative, body)
+    return json.dumps(body, sort_keys=True)
+
+
+def decode(performative: str, text: str) -> dict[str, Any]:
+    """Parse and validate a received message body."""
+    try:
+        body = json.loads(text)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise SchemaError(f"body is not valid JSON: {exc}") from exc
+    validate(performative, body)
+    return body

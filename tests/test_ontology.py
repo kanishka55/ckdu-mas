@@ -1,119 +1,85 @@
-"""Focused ontology and message-log tests; stdlib unittest keeps setup light."""
-
-from __future__ import annotations
-
 import csv
 import json
-import multiprocessing
-import tempfile
-import unittest
-from pathlib import Path
+import multiprocessing as mp
 
-from src.core.msg_log import CSV_COLUMNS, log_message, log_received_message
-from src.core.ontology import PERFORMATIVES, SCHEMAS, validate
+import pytest
+
+from src.core import msg_log, ontology
 
 
-def _write_batch(path: str, worker: int, count: int) -> None:
-    for index in range(count):
-        log_message(
-            f"sender-{worker}",
-            "receiver",
-            "inform",
-            f"thread-{worker}",
-            {"index": index},
-            path,
-        )
+def _cfp(**over):
+    body = {"type": "cfp", "month_index": 0, "round": 1, "resource": "RO_unit",
+            "units_available": 1, "deadline_s": 5.0}
+    body.update(over)
+    return body
 
 
-class TestOntology(unittest.TestCase):
-    def test_declared_performatives_and_message_families_exist(self) -> None:
-        self.assertEqual(
-            PERFORMATIVES,
-            {"cfp", "propose", "refuse", "accept-proposal", "reject-proposal", "inform", "failure"},
-        )
-        self.assertTrue({"month_tick", "well_reading", "risk_record", "alert"}.issubset(SCHEMAS))
-
-    def test_cfp_accepts_documented_example_fields(self) -> None:
-        validate(
-            "cfp",
-            {
-                "thread": "month-1-ro",
-                "month": 1,
-                "resource": "ro_unit",
-                "n_available": 3,
-                "round": 1,
-                "deadline_s": 2.0,
-            },
-        )
-
-    def test_missing_and_unexpected_fields_are_rejected(self) -> None:
-        with self.assertRaisesRegex(ValueError, "missing fields"):
-            validate("cfp", {"thread": "t"})
-        with self.assertRaisesRegex(ValueError, "unexpected fields"):
-            validate(
-                "risk_record",
-                {
-                    "ds_division": "A",
-                    "month": 1,
-                    "wqi": 90.0,
-                    "tier": "Good",
-                    "drivers": {},
-                    "n_wells": 2,
-                    "source": "synthetic",
-                    "diagnosis": "not allowed",
-                },
-            )
-
-    def test_wrong_types_and_invalid_cfp_values_are_rejected(self) -> None:
-        body = {
-            "thread": "t",
-            "month": True,
-            "resource": "ro_unit",
-            "n_available": 3,
-            "round": 1,
-            "deadline_s": 1.0,
-        }
-        with self.assertRaisesRegex(ValueError, "must be int"):
-            validate("cfp", body)
-        body["month"] = 1
-        body["resource"] = "invented_resource"
-        with self.assertRaisesRegex(ValueError, "resource must"):
-            validate("cfp", body)
-
-    def test_sent_and_received_records_keep_exact_columns(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "nested" / "messages.csv"
-            log_message("a", "b", "cfp", "thread-1", {"month": 1}, path)
-            log_received_message("a", "b", "cfp", "thread-1", {"month": 1}, path)
-            with path.open(newline="", encoding="utf-8") as handle:
-                reader = csv.DictReader(handle)
-                rows = list(reader)
-                self.assertEqual(tuple(reader.fieldnames or ()), CSV_COLUMNS)
-            self.assertEqual(len(rows), 2)
-            self.assertEqual(rows[0]["payload"], '{"month":1}')
-            self.assertTrue(rows[0]["timestamp"].endswith("+00:00"))
-
-    def test_multiprocess_appends_are_complete_and_keep_one_header(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = str(Path(tmp) / "messages.csv")
-            worker_count, rows_per_worker = 4, 15
-            processes = [
-                multiprocessing.Process(target=_write_batch, args=(path, worker, rows_per_worker))
-                for worker in range(worker_count)
-            ]
-            for process in processes:
-                process.start()
-            for process in processes:
-                process.join(timeout=10)
-                self.assertEqual(process.exitcode, 0)
-            with open(path, newline="", encoding="utf-8") as handle:
-                reader = csv.DictReader(handle)
-                rows = list(reader)
-                self.assertEqual(tuple(reader.fieldnames or ()), CSV_COLUMNS)
-            self.assertEqual(len(rows), worker_count * rows_per_worker)
-            self.assertEqual({row["sender"] for row in rows}, {f"sender-{i}" for i in range(worker_count)})
-            self.assertTrue(all(isinstance(json.loads(row["payload"]), dict) for row in rows))
+def test_round_trip():
+    text = ontology.encode(ontology.CFP, _cfp())
+    assert ontology.decode(ontology.CFP, text) == _cfp()
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_every_schema_has_a_legal_performative():
+    for allowed, _ in ontology.SCHEMAS.values():
+        assert allowed <= ontology.PERFORMATIVES
+
+
+@pytest.mark.parametrize("body, match", [
+    ({k: v for k, v in _cfp().items() if k != "round"}, "missing"),
+    (_cfp(extra=1), "unexpected"),
+    (_cfp(round="1"), "round"),
+    (_cfp(units_available=True), "bool"),
+    (_cfp(resource="helicopter"), "resource"),
+    (_cfp(deadline_s=0), "deadline"),
+    ({"type": "nonsense"}, "unknown message type"),
+])
+def test_invalid_bodies_rejected(body, match):
+    with pytest.raises(ontology.SchemaError, match=match):
+        ontology.validate(ontology.CFP, body)
+
+
+def test_type_must_match_performative():
+    with pytest.raises(ontology.SchemaError, match="not allowed"):
+        ontology.validate(ontology.PROPOSE, _cfp())
+
+
+def test_decode_rejects_non_json():
+    with pytest.raises(ontology.SchemaError):
+        ontology.decode(ontology.CFP, "not json")
+
+
+def test_risk_record_allows_null_wqi():
+    ontology.validate(ontology.INFORM, {"type": "risk_record", "month_index": 0,
+                                        "ds_division": "Padaviya", "wqi": None,
+                                        "tier": "unknown", "drivers": []})
+
+
+def test_log_writes_header_and_rows(tmp_path):
+    path = tmp_path / "messages.csv"
+    msg_log.log_message("a@x", "b@x", "cfp", "t1", _cfp(), "sent", path=path)
+    msg_log.log_message("a@x", "b@x", "cfp", "t1", json.dumps(_cfp()), "received", path=path)
+    rows = list(csv.DictReader(path.open(encoding="utf-8")))
+    assert list(rows[0]) == msg_log.COLUMNS
+    assert [r["direction"] for r in rows] == ["sent", "received"]
+    assert json.loads(rows[0]["payload"]) == _cfp()
+    with pytest.raises(ValueError):
+        msg_log.log_message("a", "b", "cfp", None, "{}", "sideways", path=path)
+
+
+def _writer(path, n):
+    for i in range(n):
+        msg_log.log_message("p@x", "q@x", "inform", f"t{i}", {"i": i, "text": "a, \"quoted\"\nline"},
+                            "sent", path=path)
+
+
+def test_concurrent_processes_do_not_corrupt_log(tmp_path):
+    path = tmp_path / "messages.csv"
+    procs = [mp.Process(target=_writer, args=(path, 50)) for _ in range(4)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+    assert all(p.exitcode == 0 for p in procs)
+    rows = list(csv.DictReader(path.open(encoding="utf-8", newline="")))
+    assert len(rows) == 200
+    assert all(json.loads(r["payload"])["text"] == "a, \"quoted\"\nline" for r in rows)
