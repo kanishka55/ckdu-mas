@@ -2,6 +2,9 @@
 
 No agent sees the full picture: a village knows its own wells, population, depot distance and
 current risk, nothing about the other villages. Bid logic lives in src/core/bidding.py.
+It bids only when its tier is Poor or worse (``bidding.has_need``); otherwise it refuses.
+``distance_to_depot_km`` is kept as village data but is not part of the bid (delivery cost is the
+coordinator's concern).
 
 Two behaviours, split by message template so neither steals the other's messages:
 - RespondToCfp: cfp / accept-proposal / reject-proposal (the Contract Net conversation)
@@ -65,7 +68,7 @@ class VillageAgent(Agent):
         self.risk, self.risk_tier, self.risk_month_index = risk, tier, month_index
 
     def raw_bid(self) -> float:
-        return bidding.bid(self.risk, self.population, self.distance_to_depot_km)
+        return bidding.bid(self.risk, self.population)
 
     class TrackRisk(CyclicBehaviour):
         async def run(self):
@@ -100,6 +103,9 @@ class VillageAgent(Agent):
 
             if agent.risk is None:
                 await refuse("no risk indicator available this month")
+                return
+            if not bidding.has_need(agent.risk_tier):
+                await refuse(f"no need this month (tier {agent.risk_tier})")
                 return
             try:
                 raw = agent.raw_bid()

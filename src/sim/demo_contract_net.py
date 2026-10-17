@@ -3,8 +3,9 @@
 cfp -> propose/refuse -> accept-proposal/reject-proposal -> inform. Every message is validated
 against src/core/ontology.py and logged to logs/messages.csv.
 
-Risk values here are STUB placeholders (Member B's RiskScoringAgent replaces them). They are not
-WQI scores and not thresholds; they only make the villages bid differently.
+Risk values here are STUB placeholders on the WQI scale (Member B's RiskScoringAgent replaces them).
+They are not computed scores; they only make two villages bid differently and one refuse
+(tier Good = no need).
 
 Run (XMPP server in another terminal: `spade run`):
     python -m src.sim.demo_contract_net
@@ -30,10 +31,10 @@ from src.sim.load_data import load_ds_divisions
 DOMAIN = "localhost"
 PASSWORD = "demo"
 DEMO_VILLAGES = ["Padaviya", "Medawachchiya", "Mihintale"]
-STUB_RISK = {  # placeholder (risk, tier) per village until Member B's agent exists
-    "Padaviya": (1.0, "STUB-high"),
-    "Medawachchiya": (0.6, "STUB-moderate"),
-    "Mihintale": (0.0, "STUB-none"),  # zero risk -> village refuses
+STUB_RISK = {  # STUB placeholder (WQI-scale risk, tier) per village, not real scores
+    "Padaviya": (140.0, "Poor"),
+    "Medawachchiya": (120.0, "Poor"),
+    "Mihintale": (80.0, "Good"),  # tier Good -> no need -> village refuses
 }
 CFP_DEADLINE_S = 5.0
 INFORM_WAIT_S = 5.0

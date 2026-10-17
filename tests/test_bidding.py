@@ -2,45 +2,41 @@ import math
 
 import pytest
 
-from src.core.bidding import MIN_DISTANCE_KM, bid, normalise_bids, rank_bids
+from src.core import risk_tiers
+from src.core.bidding import bid, has_need, normalise_bids, rank_bids
+from src.sim.load_data import load_wqi_method
 
 
-def test_first_draft_formula():
-    assert bid(2.0, 1000, 10.0) == pytest.approx(200.0)
+def test_formula_is_risk_times_population():
+    assert bid(2.0, 1000) == pytest.approx(2000.0)
 
 
-def test_more_risk_or_population_bids_more_farther_bids_less():
-    assert bid(2.0, 1000, 10.0) > bid(1.0, 1000, 10.0)
-    assert bid(1.0, 2000, 10.0) > bid(1.0, 1000, 10.0)
-    assert bid(1.0, 1000, 20.0) < bid(1.0, 1000, 10.0)
-
-
-def test_distance_zero_is_clamped():
-    assert bid(1.0, 100, 0.0) == pytest.approx(100.0 / MIN_DISTANCE_KM)
-    assert bid(1.0, 100, 0.0) == bid(1.0, 100, MIN_DISTANCE_KM / 2)
-
-
-@pytest.mark.parametrize("distance", [None, math.nan])
-def test_distance_missing_raises(distance):
-    with pytest.raises(ValueError, match="distance"):
-        bid(1.0, 100, distance)
+def test_more_risk_or_population_bids_more():
+    assert bid(2.0, 1000) > bid(1.0, 1000)
+    assert bid(1.0, 2000) > bid(1.0, 1000)
 
 
 def test_population_zero_bids_zero():
-    assert bid(1.0, 0, 10.0) == 0.0
+    assert bid(1.0, 0) == 0.0
 
 
 @pytest.mark.parametrize("population", [None, math.nan])
 def test_population_missing_raises(population):
     with pytest.raises(ValueError, match="population"):
-        bid(1.0, population, 10.0)
+        bid(1.0, population)
+
+
+@pytest.mark.parametrize("risk", [None, math.nan])
+def test_risk_missing_raises(risk):
+    with pytest.raises(ValueError, match="risk"):
+        bid(risk, 100)
 
 
 def test_zero_risk_bids_zero():
-    assert bid(0.0, 1000, 10.0) == 0.0
+    assert bid(0.0, 1000) == 0.0
 
 
-@pytest.mark.parametrize("args", [(-1.0, 10, 1.0), (1.0, -10, 1.0), (1.0, 10, -1.0)])
+@pytest.mark.parametrize("args", [(-1.0, 10), (1.0, -10)])
 def test_negative_inputs_raise(args):
     with pytest.raises(ValueError):
         bid(*args)
@@ -49,7 +45,23 @@ def test_negative_inputs_raise(args):
 def test_continuous_across_a_tier_boundary():
     # bid is a continuous function of risk: no jump either side of a boundary value
     eps = 1e-9
-    assert bid(100.0 + eps, 1000, 10.0) == pytest.approx(bid(100.0 - eps, 1000, 10.0))
+    assert bid(100.0 + eps, 1000) == pytest.approx(bid(100.0 - eps, 1000))
+
+
+@pytest.mark.parametrize("tier,expected", [
+    ("Excellent", False), ("Good", False),
+    ("Poor", True), ("Very Poor", True), ("Unsuitable", True),
+    (None, False), ("Unknown", False), ("STUB-unscored", False),
+])
+def test_has_need_only_for_poor_or_worse(tier, expected):
+    assert has_need(tier) is expected
+
+
+def test_has_need_follows_published_class_boundary():
+    # the need boundary is the ckdu_02 Good/Poor limit, not a threshold defined in bidding.py
+    classes = risk_tiers.classes_from_frame(load_wqi_method())
+    assert not has_need(risk_tiers.tier_for_wqi(99.9, classes))
+    assert has_need(risk_tiers.tier_for_wqi(100.0, classes))
 
 
 def test_normalise_scales_to_unit_range():

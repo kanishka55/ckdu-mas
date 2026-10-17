@@ -52,8 +52,9 @@ accuracy for the DS area. Good enough for distances and map markers. Not a bound
 - Distance = **straight-line (haversine) km** from the DS point to the depot
   (`src/core/geo.py`). It is not a road distance, and we applied no road-detour factor, because
   we have no published factor to use.
-- The comparison DS divisions (Monaragala 192.8 km, Kandy 118.5 km) sit far from the depot, so
-  their bids are small. That is consistent with them being outside the NCP resource pool.
+- Distance is **not** part of a village's bid (see "Bid function" below). The ResourceCoordinator
+  uses it as the delivery cost of bowser trips. The comparison DS divisions (Monaragala 192.8 km,
+  Kandy 118.5 km) sit far from the depot, so serving them by bowser is expensive.
 - `tests/test_wells.py` recomputes every distance from `lat`/`lon` and fails if they drift apart.
 
 ### `n_wells_modelled = 20`: assumption
@@ -86,7 +87,13 @@ Before the report, check Cooray et al.'s sampling months and align this table wi
 ## Bid function (`src/core/bidding.py`)
 
 Every design decision and change is recorded in the module docstring. In summary:
-`bid = risk × population / max(distance_km, 1.0)`. Zero population or zero risk gives 0. A
-missing population or distance raises, and the VillageAgent then refuses the CFP. The coordinator
-compares bids after `normalise_bids` (scaled to [0, 1]). Ties are broken alphabetically by
-`ds_division`.
+`bid = risk × population`, where risk is the village WQI. A village bids only when its tier is
+Poor, Very Poor or Unsuitable (`has_need`); at Excellent or Good it refuses with "no need this
+month". The boundary is the published Cooray et al. class limit (WQI 100, from ckdu_02), not a new
+threshold. Zero population or zero risk gives 0. A missing risk or population raises, and the
+VillageAgent then refuses the CFP. The coordinator compares bids after `normalise_bids` (scaled to
+[0, 1]). Ties are broken alphabetically by `ds_division`.
+
+Changed on 2026-10-17: the first draft divided by `distance_to_depot_km`. In the A+B test run that
+made Padaviya (tier Poor, 68 km) bid less than Kandy (tier Good), i.e. the most remote at-risk
+villages were served last. Distance is a delivery cost, not a need, so it moved to the coordinator.

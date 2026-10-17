@@ -1,47 +1,55 @@
 """VillageAgent bid function. Pure module: no SPADE imports.
 
 First draft (START_HERE): need = risk x population / distance_to_depot_km.
+Current version: need = risk x population, bid only when the village tier is Poor or worse.
 
 Design decisions (record every change to this function here, with the reason):
-- Distance is clamped to MIN_DISTANCE_KM so a village at the depot does not divide by zero
-  or receive an unbounded bid.
-- Population 0 means nobody to serve, so the bid is 0. A missing population or distance raises:
+- Population 0 means nobody to serve, so the bid is 0. A missing population or risk raises:
   the caller (VillageAgent) must refuse the CFP rather than bid on a guessed value.
 - Raw bids differ by orders of magnitude between villages, so the coordinator compares
   ``normalise_bids`` output in [0, 1] instead.
 - Ties are broken by ds_division name (alphabetical) in ``rank_bids`` so allocation is
   deterministic and reproducible.
+- 2026-10-17: distance to the depot removed from the bid. Dividing by distance made the most remote
+  at-risk villages bid lowest (A+B test run: Padaviya, tier Poor, 68 km, bid 33,924 below Kandy,
+  tier Good). Distance is a delivery cost, not a need, so the ResourceCoordinator applies it
+  (bowser trips) using ``distance_to_depot_km`` from ckdu_03.
+- 2026-10-17: ``has_need`` gates bidding on the risk tier. Once risk became the village WQI (never 0),
+  every village always bid and "no need" refusals never happened. A village now bids only when its
+  tier is Poor, Very Poor or Unsuitable. The boundary (WQI 100) is the published Cooray et al. class
+  limit read from ckdu_02 by src/core/risk_tiers.py; no new threshold is introduced here.
 """
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
 
-MIN_DISTANCE_KM = 1.0
+from src.core.risk_tiers import POOR_OR_WORSE
 
 
 def _is_missing(x) -> bool:
     return x is None or (isinstance(x, float) and math.isnan(x))
 
 
-def bid(risk: float, population: int, distance_to_depot_km: float) -> float:
-    """Raw need score for one village: risk x population / max(distance, MIN_DISTANCE_KM)."""
+def has_need(tier: str | None) -> bool:
+    """True when the village tier is Poor or worse. Unknown, stub or missing tiers have no need."""
+    return tier in POOR_OR_WORSE
+
+
+def bid(risk: float, population: int) -> float:
+    """Raw need score for one village: risk x population."""
     if _is_missing(risk):
         raise ValueError("risk is missing")
     if _is_missing(population):
         raise ValueError("population is missing")
-    if _is_missing(distance_to_depot_km):
-        raise ValueError("distance_to_depot_km is missing")
     if risk < 0:
         raise ValueError(f"risk must be >= 0, got {risk}")
     if population < 0:
         raise ValueError(f"population must be >= 0, got {population}")
-    if distance_to_depot_km < 0:
-        raise ValueError(f"distance_to_depot_km must be >= 0, got {distance_to_depot_km}")
 
     if population == 0 or risk == 0:
         return 0.0
-    return float(risk) * float(population) / max(float(distance_to_depot_km), MIN_DISTANCE_KM)
+    return float(risk) * float(population)
 
 
 def normalise_bids(raw: Mapping[str, float]) -> dict[str, float]:

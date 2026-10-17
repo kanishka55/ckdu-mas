@@ -74,8 +74,11 @@ schema you settle on in week 3 is the one the whole team lives with.
 
 ### Week 7–8 — bidding
 
-- [ ] `bid(risk, population, distance_to_depot_km) -> float`. First draft from START_HERE:
+- [x] `bid(risk, population, distance_to_depot_km) -> float`. First draft from START_HERE:
       `need = risk × population / distance`. Tune it, and write down why each change was made.
+      **Done 2026-10-17:** now `bid(risk, population) = risk × population`, and `has_need(tier)` makes a
+      village refuse unless its tier is Poor or worse. Distance moved to the coordinator (delivery
+      cost). Reasons recorded in `src/core/bidding.py` and `docs/data_assumptions.md`.
 - [ ] Edge cases, all tested: distance 0 or missing, population 0 or missing, risk at a tier
       boundary, every village bidding identically (C needs a documented tie-break).
 - [ ] Normalise bids to a fixed range so C can compare villages of very different sizes.
@@ -94,7 +97,8 @@ readings_frame.columns == [
 ]
 
 # consumed by C (Contract Net)
-def bid(risk: float, population: int, distance_to_depot_km: float) -> float: ...
+def bid(risk: float, population: int) -> float: ...   # risk = village WQI
+def has_need(tier: str | None) -> bool: ...            # True only for Poor / Very Poor / Unsuitable
 ```
 
 ## 5. Rules that bite you specifically
