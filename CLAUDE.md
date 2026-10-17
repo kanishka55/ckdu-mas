@@ -30,8 +30,10 @@ Baselines to compare against: equal split and first-come-first-served allocation
 - Commands (Claude: fill these in as they are created, keep them accurate):
   - setup: `py -3.12 -m venv .venv`, `.venv\Scripts\activate`, `pip install -r requirements.txt`
   - start XMPP server: `spade run --host localhost --memory` (`--host` must match the agents' `@localhost`)
-  - toy Contract Net demo: `python -m src.sim.demo_contract_net --embedded-server`
-    (on Windows, agents currently fail to log in to an external `spade run`; see docs/known_issues.md)
+  - toy Contract Net demo: `python -m src.sim.demo_contract_net --embedded-server` (one process), or
+    `python -m src.sim.demo_contract_net` with `spade run` in another terminal. External-server logins
+    rely on the STARTTLS workaround in src/agents/xmpp_patch.py; see docs/known_issues.md.
+    Never run both at once (port 5222).
   - risk scoring demo (stub WellMonitor -> RiskScoringAgent -> stub subscriber):
     `python -m src.sim.demo_risk_scoring --embedded-server` (writes logs/risk_scores.csv)
   - WQI tier distribution vs Cooray et al.: `python -m src.sim.validate_wqi`

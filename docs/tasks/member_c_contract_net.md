@@ -30,14 +30,17 @@ Parts A and B are built and tested together (`pytest`: 101 passed). You can buil
 - The bid is `risk × population` (risk = village WQI). **Distance is no longer in the bid.**
   Delivery cost is yours to apply (see section 3).
 
-**Run what exists (Windows: always use `--embedded-server`, see `docs/known_issues.md`):**
+**Run what exists:**
 ```
-python -m src.sim.demo_contract_net --embedded-server   # your toy demo
+python -m src.sim.demo_contract_net --embedded-server   # your toy demo, one process
 python -m src.sim.demo_f1_f2 --embedded-server          # A + B chain, all 11 villages answer a probe CFP
 pytest
 ```
-Agents currently cannot log in to an external `spade run` server on Windows. Until that is fixed,
-everything runs in one process with the embedded server.
+The external server works too (fixed 2026-10-17): `spade run --host localhost --memory` in one
+terminal, then the same commands **without** `--embedded-server`. Never run both at once (port 5222).
+The fix is a STARTTLS workaround in `src/agents/xmpp_patch.py`, applied automatically by any import
+from `src.agents`. If you write an agent outside `src/agents`, import something from `src.agents`
+first, or logins against `spade run` will hang. Details: `docs/known_issues.md`.
 
 **Still yours to build:** `allocation.py` with the three allocators, `ResourceCoordinatorAgent`
 (state machine, multi-round, `failure` + re-offer), `ClockAgent` (the demos use a stub clock),
@@ -115,9 +118,8 @@ how you use it, and do not let it silently cancel out need.
       ```
       python -m src.sim.demo_contract_net --embedded-server
       ```
-- [ ] On Windows, agents cannot log in to an external `spade run` server yet (`docs/known_issues.md`).
-      The one-process-per-agent design needs it, so fix it (or move to WSL / Prosody) before week 9,
-      and tell the team which you used.
+- [x] External `spade run` server works on Windows (STARTTLS race fixed by
+      `src/agents/xmpp_patch.py`, 2026-10-17; see `docs/known_issues.md`). No WSL needed.
 
 ### Week 3–4 — the CFP state machine
 
@@ -189,8 +191,8 @@ month, resource, ds_division, round, winning_bid, method   # method: contract_ne
 pytest -q
 python -m src.sim.demo_contract_net --embedded-server
 ```
-(Once the external-server issue is fixed: `spade run --host localhost --memory` in terminal 1, then
-the demo without `--embedded-server` in terminal 2.)
+or, with an external server: `spade run --host localhost --memory` in terminal 1, then the demo
+without `--embedded-server` in terminal 2.
 Then show `logs/messages.csv` — the actual rows, with all six performatives present. Show the
 command and its output, not a claim that it works.
 
