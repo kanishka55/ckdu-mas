@@ -9,6 +9,11 @@ from spade.message import Message
 from src.core import msg_log, ontology
 
 
+def _log_path(behaviour: CyclicBehaviour):
+    """Use an agent-specific isolated log when configured; preserve the shared default otherwise."""
+    return getattr(behaviour.agent, "message_log_path", msg_log.DEFAULT_PATH)
+
+
 async def send(
     behaviour: CyclicBehaviour,
     to: str,
@@ -20,7 +25,10 @@ async def send(
     text = ontology.encode(performative, body)
     msg = Message(to=to, body=text, thread=thread, metadata={"performative": performative})
     await behaviour.send(msg)
-    msg_log.log_message(str(behaviour.agent.jid), to, performative, thread, text, "sent")
+    msg_log.log_message(
+        str(behaviour.agent.jid), to, performative, thread, text, "sent",
+        path=_log_path(behaviour),
+    )
 
 
 async def receive(
@@ -35,7 +43,8 @@ async def receive(
         return None
     performative = msg.get_metadata("performative") or ""
     msg_log.log_message(
-        str(msg.sender), str(behaviour.agent.jid), performative, msg.thread, msg.body or "", "received"
+        str(msg.sender), str(behaviour.agent.jid), performative, msg.thread, msg.body or "", "received",
+        path=_log_path(behaviour),
     )
     try:
         body = ontology.decode(performative, msg.body)

@@ -1,0 +1,133 @@
+provenance,month_index,ds_division,tier,hotspot_status,status,reason,message,payload
+illustrative_local_demo,0,Galnewa,Good,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Kahatagasdigiliya,Good,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Kandy,Good,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Kebithigollawa,Good,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Medawachchiya,Good,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Mihintale,Poor,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Monaragala,Good,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Nochchiyagama,Poor,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Padaviya,Poor,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Palagale,Good,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,0,Talawa,Poor,unavailable,unavailable,hotspot_status_unavailable,,{}
+illustrative_local_demo,1,Galnewa,Good,false,emitted,,Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges.,"{""ds_division"":""Galnewa"",""hotspot"":false,""message"":""Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges."",""month_index"":1,""tier"":""Good"",""type"":""alert""}"
+illustrative_local_demo,1,Kahatagasdigiliya,Good,false,emitted,,Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges.,"{""ds_division"":""Kahatagasdigiliya"",""hotspot"":false,""message"":""Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges."",""month_index"":1,""tier"":""Good"",""type"":""alert""}"
+illustrative_local_demo,1,Kandy,Good,false,emitted,,Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges.,"{""ds_division"":""Kandy"",""hotspot"":false,""message"":""Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges."",""month_index"":1,""tier"":""Good"",""type"":""alert""}"
+illustrative_local_demo,1,Kebithigollawa,Good,false,emitted,,Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges.,"{""ds_division"":""Kebithigollawa"",""hotspot"":false,""message"":""Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges."",""month_index"":1,""tier"":""Good"",""type"":""alert""}"
+illustrative_local_demo,1,Medawachchiya,Good,false,emitted,,Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges.,"{""ds_division"":""Medawachchiya"",""hotspot"":false,""message"":""Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges."",""month_index"":1,""tier"":""Good"",""type"":""alert""}"
+illustrative_local_demo,1,Mihintale,Poor,true,emitted,,"Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic.","{""ds_division"":""Mihintale"",""hotspot"":true,""message"":""Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic."",""month_index"":1,""tier"":""Poor"",""type"":""alert""}"
+illustrative_local_demo,1,Monaragala,Good,false,emitted,,Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges.,"{""ds_division"":""Monaragala"",""hotspot"":false,""message"":""Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges."",""month_index"":1,""tier"":""Good"",""type"":""alert""}"
+illustrative_local_demo,1,Nochchiyagama,Poor,true,emitted,,"Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic.","{""ds_division"":""Nochchiyagama"",""hotspot"":true,""message"":""Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic."",""month_index"":1,""tier"":""Poor"",""type"":""alert""}"
+illustrative_local_demo,1,Padaviya,Poor,true,emitted,,"Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic.","{""ds_division"":""Padaviya"",""hotspot"":true,""message"":""Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic."",""month_index"":1,""tier"":""Poor"",""type"":""alert""}"
+illustrative_local_demo,1,Palagale,Good,false,emitted,,Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges.,"{""ds_division"":""Palagale"",""hotspot"":false,""message"":""Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges."",""month_index"":1,""tier"":""Good"",""type"":""alert""}"
+illustrative_local_demo,1,Talawa,Poor,true,emitted,,"Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic.","{""ds_division"":""Talawa"",""hotspot"":true,""message"":""Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic."",""month_index"":1,""tier"":""Poor"",""type"":""alert""}"
+illustrative_local_demo,2,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Medawachchiya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,2,Talawa,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Medawachchiya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,3,Talawa,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Medawachchiya,Poor,false,emitted,,"Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking.","{""ds_division"":""Medawachchiya"",""hotspot"":false,""message"":""Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking."",""month_index"":4,""tier"":""Poor"",""type"":""alert""}"
+illustrative_local_demo,4,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,4,Talawa,Good,false,emitted,,Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges.,"{""ds_division"":""Talawa"",""hotspot"":false,""message"":""Risk indicator derived from published water-quality thresholds. This month's water-quality indicators for your well are within published guideline ranges."",""month_index"":4,""tier"":""Good"",""type"":""alert""}"
+illustrative_local_demo,5,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,5,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,5,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,5,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,5,Medawachchiya,Poor,true,emitted,,"Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic.","{""ds_division"":""Medawachchiya"",""hotspot"":true,""message"":""Risk indicator derived from published water-quality thresholds. Water-quality indicators for this well are outside published guideline ranges for drinking water. Where possible, use an alternate source (RO-treated or piped supply) for drinking and cooking. Routine kidney-health screening is available at your nearest clinic."",""month_index"":5,""tier"":""Poor"",""type"":""alert""}"
+illustrative_local_demo,5,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,5,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,5,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,5,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,5,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,5,Talawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Medawachchiya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,6,Talawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Medawachchiya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,7,Talawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Medawachchiya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,8,Talawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Medawachchiya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,9,Talawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Medawachchiya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,10,Talawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Galnewa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Kahatagasdigiliya,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Kandy,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Kebithigollawa,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Medawachchiya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Mihintale,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Monaragala,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Nochchiyagama,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Padaviya,Poor,true,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Palagale,Good,false,suppressed,unchanged_state,,{}
+illustrative_local_demo,11,Talawa,Good,false,suppressed,unchanged_state,,{}

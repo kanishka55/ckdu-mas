@@ -12,6 +12,8 @@ Two behaviours, split by message template so neither steals the other's messages
 """
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 from spade.agent import Agent
 from spade.behaviour import CyclicBehaviour
@@ -19,6 +21,8 @@ from spade.template import Template
 
 from src.agents import common
 from src.core import bidding, ontology, wells
+
+_KNOWN_RISK_TIERS = bidding.POOR_OR_WORSE | frozenset({"Excellent", "Good", "Unknown"})
 
 CFP_WAIT_S = 30.0        # how long to wait for the next CFP before checking again
 RISK_WAIT_S = 30.0       # how long to wait for the next risk record before checking again
@@ -101,8 +105,22 @@ class VillageAgent(Agent):
                 await common.send(self, coordinator, ontology.REFUSE,
                                   {"type": "refuse", **base, "reason": reason}, msg.thread)
 
-            if agent.risk is None:
-                await refuse("no risk indicator available this month")
+            month_index = cfp["month_index"]
+            if (not isinstance(month_index, int) or isinstance(month_index, bool)
+                    or not isinstance(agent.risk_month_index, int)
+                    or isinstance(agent.risk_month_index, bool)
+                    or agent.risk_month_index != month_index):
+                await refuse("no risk indicator available for this CFP month")
+                return
+            if (not isinstance(agent.risk, (int, float)) or isinstance(agent.risk, bool)
+                    or not math.isfinite(agent.risk) or agent.risk < 0):
+                await refuse("risk indicator is missing or invalid for this CFP month")
+                return
+            if not isinstance(agent.risk_tier, str) or agent.risk_tier not in _KNOWN_RISK_TIERS:
+                await refuse("risk tier is missing or invalid for this CFP month")
+                return
+            if agent.risk_tier == "Unknown":
+                await refuse("risk tier is Unknown; cannot make a risk-based bid")
                 return
             if not bidding.has_need(agent.risk_tier):
                 await refuse(f"no need this month (tier {agent.risk_tier})")

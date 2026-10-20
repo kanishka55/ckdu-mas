@@ -1,0 +1,621 @@
+"""Lifecycle-safe, month-stepped SPADE simulation runner.
+
+This runs the existing WellMonitorAgent, RiskScoringAgent, VillageAgents, and
+single-round ResourceCoordinatorAgent. Hotspot screening and alert decisions
+use their existing pure interfaces; they are not represented as live SPADE
+agents. All run outputs and message logs are isolated under a fresh output root.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import csv
+import json
+import math
+import re
+import time
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import spade
+from spade.agent import Agent
+from spade.behaviour import CyclicBehaviour
+
+from src.agents import common
+from src.agents.alert import AlertAgent
+from src.agents.clock import ClockAgent
+from src.agents.resource_coordinator import ResourceCoordinatorAgent
+from src.agents.risk_scoring import RiskScoringAgent
+from src.agents.village import VillageAgent
+from src.agents.well_monitor import WellMonitorAgent
+from src.core import contract_net, msg_log, ontology, risk_tiers, wells, wqi
+from src.core.hotspot_screening import ScreeningRule, screen_risk_history
+from src.sim import load_data, risk_outputs
+from src.sim.evaluate import evaluate
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_INPUT = ROOT / "data/processed/synthetic_wells.csv"
+DEFAULT_METHOD = ROOT / "data/raw/ckdu_02_wqi_method_and_thresholds.csv"
+DEFAULT_DIVISIONS = ROOT / "data/raw/ckdu_03_sampling_design_ds_divisions.csv"
+MANIFEST_NAME = "run_manifest.json"
+
+
+@dataclass(frozen=True)
+class AgentIdentityConfig:
+    """Local parts used to derive per-run SPADE JIDs under the configured domain."""
+
+    clock: str = "clock"
+    well_monitor: str = "well_monitor"
+    risk_scoring: str = "risk_scoring"
+    risk_observer_prefix: str = "risk_observer"
+    coordinator_prefix: str = "coordinator_m"
+    village_prefix: str = "village_"
+
+    def __post_init__(self) -> None:
+        values = (self.clock, self.well_monitor, self.risk_scoring, self.risk_observer_prefix,
+                  self.coordinator_prefix, self.village_prefix)
+        if any(not isinstance(value, str) or not value.strip() or "@" in value for value in values):
+            raise ValueError("agent identity local parts/prefixes must be non-empty and omit @domain")
+
+
+@dataclass(frozen=True)
+class SimulationConfig:
+    """Configuration for an isolated run. Calendar labels are never inferred."""
+
+    start_month_index: int
+    end_month_index: int
+    calendar_month_by_index: Mapping[int, int]
+    output_dir: Path
+    resource: str = "RO_unit"
+    resource_pool: int = 1
+    round_number: int = 1
+    proposal_timeout_s: float = 5.0
+    confirmation_timeout_s: float = 5.0
+    stage_timeout_s: float = 45.0
+    clock_send_timeout_s: float = 10.0
+    domain: str = "localhost"
+    embedded_server: bool = False
+    password: str = "demo"
+    run_id: str = "local"
+    agent_identities: AgentIdentityConfig = AgentIdentityConfig()
+    input_path: Path = DEFAULT_INPUT
+    method_path: Path = DEFAULT_METHOD
+    divisions_path: Path = DEFAULT_DIVISIONS
+    hotspot_rule: ScreeningRule | None = None
+
+    def __post_init__(self) -> None:
+        for field_name, value in (("start_month_index", self.start_month_index),
+                                  ("end_month_index", self.end_month_index),
+                                  ("resource_pool", self.resource_pool),
+                                  ("round_number", self.round_number)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer")
+        if self.end_month_index < self.start_month_index:
+            raise ValueError("end_month_index must be >= start_month_index")
+        if self.resource not in ontology.RESOURCES:
+            raise ValueError(f"resource must be one of {sorted(ontology.RESOURCES)}")
+        for name in ("proposal_timeout_s", "confirmation_timeout_s", "stage_timeout_s",
+                     "clock_send_timeout_s"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be positive")
+        expected = set(range(self.start_month_index, self.end_month_index + 1))
+        if set(self.calendar_month_by_index) != expected:
+            raise ValueError("calendar_month_by_index must explicitly map every configured month_index")
+        for index, month in self.calendar_month_by_index.items():
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise ValueError("calendar mapping keys must be integer month_index values")
+            if isinstance(month, bool) or not isinstance(month, int) or month not in range(1, 13):
+                raise ValueError(f"calendar month for month_index {index} must be 1..12")
+        if not self.domain.strip() or not self.run_id.strip():
+            raise ValueError("domain and run_id must be non-empty")
+        if not isinstance(self.embedded_server, bool):
+            raise ValueError("embedded_server must be bool")
+        if not isinstance(self.output_dir, Path):
+            object.__setattr__(self, "output_dir", Path(self.output_dir))
+
+
+class RiskRecordCollectorAgent(Agent):
+    """Run-local sink retaining the risk records sent by the existing scorer."""
+
+    def __init__(self, *args, receive_timeout_s: float, **kwargs):
+        super().__init__(*args, **kwargs)
+        if receive_timeout_s <= 0:
+            raise ValueError("receive_timeout_s must be positive")
+        self.receive_timeout_s = receive_timeout_s
+        self.records: list[dict[str, Any]] = []
+        self.duplicate_keys: list[tuple[int, str]] = []
+
+    class Collect(CyclicBehaviour):
+        async def run(self):
+            agent: RiskRecordCollectorAgent = self.agent
+            got = await common.receive(self, timeout=agent.receive_timeout_s)
+            if got is None:
+                return
+            _, performative, body = got
+            if performative == ontology.INFORM and body["type"] == "risk_record":
+                key = (body["month_index"], body["ds_division"])
+                if any((row["month_index"], row["ds_division"]) == key for row in agent.records):
+                    agent.duplicate_keys.append(key)
+                agent.records.append(dict(body))
+
+    async def setup(self):
+        self.add_behaviour(self.Collect())
+
+
+def validate_output_dir(output_dir: str | Path) -> Path:
+    """Reject production, source, fixture, and existing-result paths before any run writes."""
+    root = Path(output_dir).expanduser().resolve()
+    if root in {Path("/"), ROOT}:
+        raise ValueError(f"refusing unsafe output directory: {root}")
+    protected = (ROOT / "logs", ROOT / "data/raw", ROOT / "data/processed", ROOT / "tests",
+                 ROOT / "src", ROOT / "dashboard", ROOT / "demo_output")
+    for target in protected:
+        try:
+            root.relative_to(target.resolve())
+        except ValueError:
+            continue
+        raise ValueError(f"refusing to write simulation output under protected path: {target}")
+    if root.exists() and any(root.iterdir()):
+        raise FileExistsError(f"output directory is not empty; choose a fresh isolated path: {root}")
+    return root
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    if not slug:
+        raise ValueError(f"cannot form an agent identity from division {value!r}")
+    return slug
+
+
+def _jid(localpart: str, domain: str) -> str:
+    return f"{localpart}@{domain}"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _write_json_exclusive(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True, allow_nan=False)
+        stream.write("\n")
+
+
+def _rewrite_owned_json(path: Path, value: Any) -> None:
+    """Refresh the run manifest that this invocation reserved with exclusive creation."""
+    with path.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True, allow_nan=False)
+        stream.write("\n")
+
+
+async def _wait_for_month(
+    month_index: int,
+    divisions: Sequence[str],
+    monitor: WellMonitorAgent,
+    scorer: RiskScoringAgent,
+    collector: RiskRecordCollectorAgent,
+    villages: Sequence[VillageAgent],
+    timeout_s: float,
+) -> tuple[bool, str | None]:
+    """Await actual monitor/scorer/collector/village state with a finite barrier timeout."""
+    deadline = time.monotonic() + timeout_s
+    village_by_name = {v.ds_division: v for v in villages}
+    expected = set(divisions)
+    while time.monotonic() < deadline:
+        scorer_rows = [row for row in scorer.history if row.get("month_index") == month_index]
+        collector_rows = [row for row in collector.records if row.get("month_index") == month_index]
+        collector_divisions = {row["ds_division"] for row in collector_rows}
+        villages_current = all(village_by_name[name].risk_month_index == month_index for name in expected)
+        if (month_index in monitor.ticks_handled and len(scorer_rows) >= len(expected)
+                and expected.issubset(collector_divisions) and villages_current):
+            if len(scorer_rows) != len(expected) or len(collector_rows) != len(expected):
+                return False, "duplicate_or_unexpected_risk_records_for_month"
+            return True, None
+        await asyncio.sleep(0.02)
+    return False, "timed_out_waiting_for_monthly_risk_delivery_and_village_state"
+
+
+def _read_message_counts(path: Path) -> dict[str, Any]:
+    by_direction: Counter[str] = Counter()
+    by_performative: Counter[str] = Counter()
+    rows = 0
+    if path.is_file():
+        with path.open(newline="", encoding="utf-8") as stream:
+            reader = csv.DictReader(stream)
+            if reader.fieldnames != msg_log.COLUMNS:
+                raise ValueError(f"message log schema mismatch: {reader.fieldnames!r}")
+            for row in reader:
+                rows += 1
+                by_direction[row["direction"]] += 1
+                by_performative[row["performative"]] += 1
+    return {"logged_rows_including_sent_received_copies": rows,
+            "by_direction": dict(sorted(by_direction.items())),
+            "by_performative": dict(sorted(by_performative.items()))}
+
+
+async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
+    """Run configured SPADE months; write every artifact only below a fresh output root."""
+    output_root = validate_output_dir(config.output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    log_path = output_root / "logs/messages.csv"
+    round_dir = output_root / "rounds"
+    round_dir.mkdir(parents=True, exist_ok=True)
+    run_id = config.run_id
+    message_log_path = log_path
+    started_agents: list[tuple[str, Agent]] = []
+    lifecycle: list[dict[str, Any]] = []
+    months: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    risk_records: list[dict[str, Any]] = []
+    hotspot_rows: list[dict[str, Any]] = []
+    alert_rows: list[dict[str, Any]] = []
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "status": "running",
+        "started_at": _utc_now(),
+        "provenance": {
+            "classification": "synthetic_simulation",
+            "input_path": str(config.input_path),
+            "source_required": "synthetic",
+            "seasonal_readings_repeated_by_existing_well_expansion": True,
+            "not_new_monthly_measurements": True,
+            "reduced_parameter_wqi": True,
+            "ckdu_diagnostic_or_causal_claim": False,
+            "contract_net": "existing single-round SPADE coordinator; not a multi-round convergence implementation",
+            "hotspot": "project-defined screening only; not a validated medical or epidemiological model",
+            "alerts": "existing AlertAgent decision function; no live SPADE alert transport",
+        },
+        "configuration": {
+            "start_month_index": config.start_month_index,
+            "end_month_index": config.end_month_index,
+            "calendar_month_by_index": dict(config.calendar_month_by_index),
+            "resource": config.resource,
+            "resource_pool": config.resource_pool,
+            "round_number": config.round_number,
+            "proposal_timeout_s": config.proposal_timeout_s,
+            "confirmation_timeout_s": config.confirmation_timeout_s,
+            "stage_timeout_s": config.stage_timeout_s,
+            "domain": config.domain,
+            "embedded_server": config.embedded_server,
+            "output_dir": str(output_root),
+            "agent_identities": {
+                "clock": config.agent_identities.clock,
+                "well_monitor": config.agent_identities.well_monitor,
+                "risk_scoring": config.agent_identities.risk_scoring,
+                "risk_observer_prefix": config.agent_identities.risk_observer_prefix,
+                "coordinator_prefix": config.agent_identities.coordinator_prefix,
+                "village_prefix": config.agent_identities.village_prefix,
+            },
+            "hotspot_rule": None if config.hotspot_rule is None else {
+                "rule_id": config.hotspot_rule.rule_id,
+                "trigger_tiers": sorted(config.hotspot_rule.trigger_tiers),
+                "consecutive_months": config.hotspot_rule.consecutive_months,
+            },
+        },
+        "agent_lifecycle": lifecycle,
+        "month_status": months,
+        "round_result_paths": [],
+        "stage_status": {},
+        "message_counts": {},
+        "failures": failures,
+    }
+    manifest_path = output_root / MANIFEST_NAME
+    _write_json_exclusive(manifest_path, manifest)
+
+    try:
+        monthly = load_data.load_monthly_readings(config.input_path)
+        if set(monthly["source"].astype(str)) != {"synthetic"}:
+            raise ValueError("simulation input must contain only source='synthetic' readings")
+        divisions_frame = load_data.load_ds_divisions(config.divisions_path)
+        divisions = sorted(str(value) for value in divisions_frame["ds_division"].tolist())
+        method_frame = load_data.load_wqi_method(config.method_path)
+        method = wqi.method_from_frame(method_frame)
+        classes = risk_tiers.classes_from_frame(method_frame)
+        manifest["input_record_count"] = int(len(monthly))
+        manifest["divisions"] = divisions
+
+        village_jids: dict[str, str] = {}
+        used_slugs: set[str] = set()
+        for division in divisions:
+            slug = _slug(division)
+            if slug in used_slugs:
+                raise ValueError(f"division names collide after JID normalization: {division!r}")
+            used_slugs.add(slug)
+            village_jids[division] = _jid(f"{config.agent_identities.village_prefix}{slug}", config.domain)
+        clock_jid = _jid(config.agent_identities.clock, config.domain)
+        monitor_jid = _jid(config.agent_identities.well_monitor, config.domain)
+        scorer_jid = _jid(config.agent_identities.risk_scoring, config.domain)
+        collector_jid = _jid(f"{config.agent_identities.risk_observer_prefix}_{_slug(run_id)}", config.domain)
+
+        divisions_indexed = divisions_frame.set_index("ds_division")
+        villages = [VillageAgent(
+            village_jids[name], config.password, ds_division=name,
+            population=int(divisions_indexed.loc[name, "population"]),
+            distance_to_depot_km=float(divisions_indexed.loc[name, "distance_to_depot_km"]),
+            local_wells=monthly[monthly["ds_division"] == name],
+        ) for name in divisions]
+        collector = RiskRecordCollectorAgent(collector_jid, config.password, receive_timeout_s=1.0)
+        scorer = RiskScoringAgent(
+            scorer_jid, config.password,
+            subscribers=[collector_jid], hotspot_subscribers=[], village_jids=village_jids,
+            method=method, classes=classes,
+        )
+        monitor = WellMonitorAgent(monitor_jid, config.password, monthly, divisions,
+                                   recipients=[scorer_jid])
+        clock = ClockAgent(clock_jid, config.password, recipients=[monitor_jid])
+        agents: list[tuple[str, Agent]] = (
+            [(f"VillageAgent:{name}", agent) for name, agent in zip(divisions, villages)]
+            + [("RiskRecordCollector", collector), ("RiskScoringAgent", scorer),
+               ("WellMonitorAgent", monitor), ("ClockAgent", clock)]
+        )
+        for _name, agent in agents:
+            agent.message_log_path = message_log_path
+        alert_agent = AlertAgent(logger=lambda sender, receiver, performative, thread, payload, direction:
+                                 msg_log.log_message(sender, receiver, performative, thread, payload,
+                                                     direction, path=message_log_path))
+
+        for name, agent in agents:
+            try:
+                await agent.start(auto_register=True)
+            except Exception:
+                lifecycle.append({"component": name, "event": "start_failed", "at": _utc_now()})
+                raise
+            started_agents.append((name, agent))
+            lifecycle.append({"component": name, "event": "started", "at": _utc_now(),
+                              "jid": str(agent.jid)})
+
+        manifest["stage_status"]["risk_scoring"] = "running"
+        for month_index in range(config.start_month_index, config.end_month_index + 1):
+            calendar_month = config.calendar_month_by_index[month_index]
+            month_status: dict[str, Any] = {
+                "month_index": month_index,
+                "calendar_month": calendar_month,
+                "status": "running",
+                "clock_tick": "pending",
+                "risk_delivery": "pending",
+                "hotspot_screening": "unavailable" if config.hotspot_rule is None else "pending",
+                "alert_decisions": "pending",
+                "contract_net": "pending",
+            }
+            months.append(month_status)
+            await clock.publish_month(month_index, calendar_month, timeout_s=config.clock_send_timeout_s)
+            month_status["clock_tick"] = "published"
+            risk_ready, reason = await _wait_for_month(
+                month_index, divisions, monitor, scorer, collector, villages, config.stage_timeout_s,
+            )
+            if not risk_ready:
+                month_status.update(status="incomplete", risk_delivery="unavailable", reason=reason,
+                                    contract_net="skipped_missing_current_month_risk")
+                failures.append({"stage": f"month_index={month_index}", "error": reason or "risk delivery failed"})
+                continue
+
+            month_status["risk_delivery"] = "complete"
+            month_records = [dict(row) for row in collector.records if row["month_index"] == month_index]
+            risk_records.extend(month_records)
+            divisions_for_month = {record["ds_division"] for record in month_records}
+            if divisions_for_month != set(divisions):
+                month_status.update(status="incomplete", contract_net="skipped_missing_current_month_risk")
+                continue
+
+            for division in divisions:
+                screen = screen_risk_history(
+                    risk_records, ds_division=division, month_index=month_index,
+                    rule=config.hotspot_rule,
+                )
+                hotspot_rows.append({"provenance": "project_defined_screening_not_validated_model",
+                                     **screen.__dict__})
+                decision = alert_agent.process_risk_record(
+                    next(record for record in month_records if record["ds_division"] == division),
+                    hotspot=screen.alert_hotspot,
+                )
+                alert_rows.append({"provenance": "local_alert_decision_function_not_live_transport",
+                                   "status": decision.status, "month_index": decision.month_index,
+                                   "ds_division": decision.ds_division, "tier": decision.tier,
+                                   "hotspot": decision.hotspot, "message": decision.message,
+                                   "reason": decision.reason})
+            month_status["hotspot_screening"] = (
+                "complete" if all(row["status"] != "unavailable" for row in hotspot_rows
+                                   if row["month_index"] == month_index) else "partially_unavailable"
+            )
+            month_status["alert_decisions"] = "complete"
+
+            coordinator_jid = _jid(f"{config.agent_identities.coordinator_prefix}{month_index}", config.domain)
+            round_path = round_dir / f"month_index_{month_index:04d}_round_{config.round_number}.json"
+            coordinator_config = contract_net.CoordinatorConfig(
+                month_index=month_index, round_number=config.round_number,
+                resource=config.resource, resource_pool=config.resource_pool,
+                recipients=[contract_net.VillageRecipient(village_jids[name], name) for name in divisions],
+                proposal_timeout_s=config.proposal_timeout_s,
+                confirmation_timeout_s=config.confirmation_timeout_s,
+                output_path=round_path,
+                thread_id=f"ckdu-{_slug(run_id)}-month-{month_index}-round-{config.round_number}",
+                provenance="synthetic-input SPADE simulation; single bounded Contract Net round",
+            )
+            coordinator = ResourceCoordinatorAgent(coordinator_jid, config.password, coordinator_config)
+            coordinator.message_log_path = message_log_path
+            name = f"ResourceCoordinatorAgent:month_index={month_index}:round={config.round_number}"
+            try:
+                await coordinator.start(auto_register=True)
+            except Exception:
+                lifecycle.append({"component": name, "event": "start_failed", "at": _utc_now()})
+                raise
+            started_agents.append((name, coordinator))
+            lifecycle.append({"component": name, "event": "started", "at": _utc_now(),
+                              "jid": str(coordinator.jid)})
+            behaviour = next(iter(coordinator.behaviours))
+            try:
+                await asyncio.wait_for(
+                    behaviour.join(),
+                    timeout=config.proposal_timeout_s + config.confirmation_timeout_s + 15.0,
+                )
+            finally:
+                try:
+                    await coordinator.stop()
+                except Exception as exc:
+                    failures.append({"stage": f"shutdown:{name}",
+                                     "error": f"{type(exc).__name__}: {exc}"})
+                    lifecycle.append({"component": name, "event": "stop_failed", "at": _utc_now()})
+                else:
+                    started_agents.remove((name, coordinator))
+                    lifecycle.append({"component": name, "event": "stopped", "at": _utc_now()})
+            if coordinator.round_result is None:
+                month_status.update(status="incomplete", contract_net="no_round_result")
+                failures.append({"stage": name, "error": "coordinator completed without a round result"})
+            else:
+                month_status["contract_net"] = coordinator.round_result["award_status"]
+                month_status["status"] = "complete"
+                manifest["round_result_paths"].append(str(round_path.relative_to(output_root)))
+
+        manifest["stage_status"]["risk_scoring"] = (
+            "complete" if risk_records else "unavailable_no_risk_records"
+        )
+        manifest["stage_status"]["hotspot_screening"] = (
+            "unavailable_rule_not_configured" if config.hotspot_rule is None else "screening_outputs_recorded"
+        )
+        manifest["stage_status"]["hotspot_agent"] = "missing_not_implemented"
+        manifest["stage_status"]["alert_decisions"] = "decision_function_only_no_live_spade_transport"
+        manifest["stage_status"]["alert_transport"] = "missing_not_implemented"
+        manifest["stage_status"]["contract_net"] = (
+            "single_round_per_completed_month" if any(m["contract_net"] not in {
+                "pending", "skipped_missing_current_month_risk", "no_round_result"} for m in months)
+            else "unavailable_no_completed_rounds"
+        )
+        manifest["stage_status"]["agent_monitor"] = "not_implemented"
+
+        if scorer.history:
+            risk_outputs.write_outputs(
+                scorer.history,
+                risk_path=output_root / "logs/risk_scores.csv",
+                well_path=output_root / "logs/well_scores.csv",
+            )
+        else:
+            manifest["stage_status"]["risk_score_files"] = "unavailable_no_scored_records"
+        _write_json_exclusive(output_root / "risk_records.json", risk_records)
+        _write_json_exclusive(output_root / "hotspot_screening.json", hotspot_rows)
+        _write_json_exclusive(output_root / "alert_decisions.json", alert_rows)
+        if config.hotspot_rule is None:
+            manifest["stage_status"]["hotspot_screening"] = "unavailable_rule_not_configured"
+        results = evaluate(
+            messages_path=log_path,
+            allocations_path=output_root / "logs/allocations.csv",  # intentionally absent: no verified baseline bundle
+            output_path=output_root / "logs/evaluation_summary.csv",
+            risk_records=risk_records or None,
+        )
+        manifest["evaluation_status"] = {
+            result.metric: {"status": result.status, "value": result.value,
+                            "unit": result.unit, "reason": result.details.get("reason")}
+            for result in results
+        }
+        manifest["message_counts"] = _read_message_counts(log_path)
+        manifest["status"] = "completed_with_unavailable_stages"
+    except Exception as exc:
+        failures.append({"stage": "runner", "error": f"{type(exc).__name__}: {exc}"})
+        manifest["status"] = "failed"
+        raise
+    finally:
+        for name, agent in reversed(started_agents):
+            try:
+                await agent.stop()
+            except Exception as exc:
+                failures.append({"stage": f"shutdown:{name}", "error": f"{type(exc).__name__}: {exc}"})
+                lifecycle.append({"component": name, "event": "stop_failed", "at": _utc_now()})
+            else:
+                lifecycle.append({"component": name, "event": "stopped", "at": _utc_now()})
+        manifest["completed_at"] = _utc_now()
+        manifest["agent_lifecycle"] = lifecycle
+        manifest["month_status"] = months
+        manifest["failures"] = failures
+        if log_path.is_file():
+            try:
+                manifest["message_counts"] = _read_message_counts(log_path)
+            except Exception as exc:
+                failures.append({"stage": "message_log_summary", "error": str(exc)})
+        if not manifest.get("stage_status"):
+            manifest["stage_status"] = {"runner": "failed_before_agent_start"}
+        if not manifest.get("status") or manifest["status"] == "running":
+            manifest["status"] = "failed" if failures else "incomplete"
+        _rewrite_owned_json(manifest_path, manifest)
+    return manifest
+
+
+def _month_mapping(start: int, months: Sequence[int]) -> dict[int, int]:
+    return dict(zip(range(start, start + len(months)), months))
+
+
+def _parse_int_list(raw: str) -> list[int]:
+    try:
+        return [int(value.strip()) for value in raw.split(",") if value.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("months must be comma-separated integers") from exc
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Run a fresh, isolated multi-month CKDu MAS simulation")
+    parser.add_argument("--start-month-index", type=int, default=0)
+    parser.add_argument("--end-month-index", type=int, required=True,
+                        help="inclusive simulated month_index; provide one calendar label per index")
+    parser.add_argument("--calendar-months", type=_parse_int_list, required=True,
+                        help="explicit calendar month labels 1..12, comma-separated")
+    parser.add_argument("--output-dir", type=Path, required=True,
+                        help="fresh output root; must not be production logs/data/fixtures/demo_output")
+    parser.add_argument("--resource", choices=sorted(ontology.RESOURCES), default="RO_unit")
+    parser.add_argument("--resource-pool", type=int, default=1)
+    parser.add_argument("--round-number", type=int, default=1)
+    parser.add_argument("--proposal-timeout", type=float, default=5.0)
+    parser.add_argument("--confirmation-timeout", type=float, default=5.0)
+    parser.add_argument("--stage-timeout", type=float, default=45.0)
+    parser.add_argument("--domain", default="localhost")
+    parser.add_argument("--clock-id", default="clock")
+    parser.add_argument("--well-monitor-id", default="well_monitor")
+    parser.add_argument("--risk-scoring-id", default="risk_scoring")
+    parser.add_argument("--risk-observer-prefix", default="risk_observer")
+    parser.add_argument("--coordinator-prefix", default="coordinator_m")
+    parser.add_argument("--village-prefix", default="village_")
+    parser.add_argument("--password", default="demo", help="XMPP password; omit from saved manifests")
+    parser.add_argument("--run-id", default="local")
+    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument("--method", type=Path, default=DEFAULT_METHOD)
+    parser.add_argument("--divisions", type=Path, default=DEFAULT_DIVISIONS)
+    parser.add_argument("--hotspot-trigger-tier", action="append", default=None,
+                        help="explicit provisional screening tier (repeat flag; no default rule)")
+    parser.add_argument("--hotspot-consecutive-months", type=int)
+    parser.add_argument("--embedded-server", action="store_true",
+                        help="use SPADE's embedded XMPP server")
+    args = parser.parse_args(argv)
+    calendar = _month_mapping(args.start_month_index, args.calendar_months)
+    if args.end_month_index != args.start_month_index + len(args.calendar_months) - 1:
+        parser.error("calendar-months must contain exactly one value for each configured month_index")
+    rule = None
+    if args.hotspot_trigger_tier is not None or args.hotspot_consecutive_months is not None:
+        if not args.hotspot_trigger_tier or args.hotspot_consecutive_months is None:
+            parser.error("configure both --hotspot-trigger-tier and --hotspot-consecutive-months, or neither")
+        rule = ScreeningRule("cli_configured_screening_v1", frozenset(args.hotspot_trigger_tier),
+                             args.hotspot_consecutive_months)
+    config = SimulationConfig(
+        start_month_index=args.start_month_index, end_month_index=args.end_month_index,
+        calendar_month_by_index=calendar, output_dir=args.output_dir,
+        resource=args.resource, resource_pool=args.resource_pool, round_number=args.round_number,
+        proposal_timeout_s=args.proposal_timeout, confirmation_timeout_s=args.confirmation_timeout,
+        stage_timeout_s=args.stage_timeout, domain=args.domain,
+        embedded_server=args.embedded_server, password=args.password,
+        run_id=args.run_id, input_path=args.input, method_path=args.method,
+        divisions_path=args.divisions, hotspot_rule=rule,
+        agent_identities=AgentIdentityConfig(
+            clock=args.clock_id, well_monitor=args.well_monitor_id,
+            risk_scoring=args.risk_scoring_id,
+            risk_observer_prefix=args.risk_observer_prefix,
+            coordinator_prefix=args.coordinator_prefix, village_prefix=args.village_prefix,
+        ),
+    )
+    spade.run(run_simulation(config), embedded_xmpp_server=config.embedded_server)
+
+
+if __name__ == "__main__":
+    main()
