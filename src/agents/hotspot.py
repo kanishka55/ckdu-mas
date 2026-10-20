@@ -1,9 +1,4 @@
-"""SPADE subscriber for project-defined screening of typed village risk records.
-
-This agent consumes the existing ``risk_record`` INFORM messages. Its output is a
-run-local screening artifact, not a new ontology message or validated epidemiological
-finding. The shared ontology has no suitable hotspot-result message type.
-"""
+"""SPADE subscriber for project-defined screening of typed village risk records."""
 from __future__ import annotations
 
 import json
@@ -13,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from spade.agent import Agent
-from spade.behaviour import CyclicBehaviour
+from spade.behaviour import CyclicBehaviour, OneShotBehaviour
 
 from src.agents import common
 from src.core import ontology
@@ -36,6 +31,7 @@ class HotspotAgent(Agent):
         divisions: Sequence[str],
         rule: ScreeningRule | None,
         output_path: str | Path,
+        result_recipient_jid: str | None = None,
         receive_timeout_s: float = 1.0,
         **kwargs,
     ):
@@ -50,14 +46,17 @@ class HotspotAgent(Agent):
         self.divisions = tuple(divisions)
         self.rule = rule
         self.output_path = Path(output_path)
+        self.result_recipient_jid = result_recipient_jid
         self.receive_timeout_s = float(receive_timeout_s)
         self.risk_history: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.last_month_by_division: dict[str, int] = {}
         self.results_by_key: dict[tuple[str, int], ScreeningResult] = {}
         self.rejected_records: list[dict[str, Any]] = []
         self.finalized_month_indexes: set[int] = set()
+        self.thread_by_key: dict[tuple[str, int], str | None] = {}
+        self.published_keys: set[tuple[str, int]] = set()
 
-    def process_risk_record(self, body: Mapping[str, Any]) -> ScreeningResult:
+    def process_risk_record(self, body: Mapping[str, Any], thread_id: str | None = None) -> ScreeningResult:
         """Validate and screen one decoded risk body; exposed for deterministic unit tests."""
         raw_division = body.get("ds_division") if isinstance(body, Mapping) else None
         division = raw_division if isinstance(raw_division, str) else ""
@@ -87,6 +86,18 @@ class HotspotAgent(Agent):
         division = record["ds_division"]
         month_index = record["month_index"]
         key = (division, month_index)
+        if thread_id is not None:
+            previous_thread = self.thread_by_key.get(key)
+            if previous_thread is None:
+                self.thread_by_key[key] = thread_id
+            elif previous_thread != thread_id:
+                result = ScreeningResult("unavailable", division, month_index,
+                                         self.rule.rule_id if self.rule else None,
+                                         reason="conflicting_risk_correlation_threads")
+                self.rejected_records.append({"ds_division": division, "month_index": month_index,
+                                              "reason": result.reason})
+                self.results_by_key[key] = result
+                return result
         if month_index in self.finalized_month_indexes:
             result = ScreeningResult("unavailable", division, month_index,
                                      self.rule.rule_id if self.rule else None,
@@ -167,15 +178,39 @@ class HotspotAgent(Agent):
             json.dump(payload, stream, indent=2, sort_keys=True, allow_nan=False)
             stream.write("\n")
 
+    async def publish_month_results(self, month_index: int) -> None:
+        """Publish typed per-division results once to the configured alert processor."""
+        if self.result_recipient_jid is None:
+            return
+        for result in self.finalize_month(month_index):
+            key = (result.ds_division, result.month_index)
+            if key in self.published_keys:
+                continue
+            body = {"type": "hotspot_result", "month_index": result.month_index,
+                    "ds_division": result.ds_division, "status": result.status,
+                    "rule_id": result.rule_id,
+                    "evidence_month_indexes": list(result.evidence_month_indexes),
+                    "reason": result.reason}
+            ontology.validate(ontology.INFORM, body)
+            thread = self.thread_by_key.get(key) or f"readings-{month_index}"
+            agent = self
+            class Publish(OneShotBehaviour):
+                async def run(self):
+                    await common.send(self, agent.result_recipient_jid, ontology.INFORM, body, thread)
+            behaviour = Publish()
+            self.add_behaviour(behaviour)
+            await behaviour.join()
+            self.published_keys.add(key)
+
     class ReceiveRiskRecords(CyclicBehaviour):
         async def run(self):
             agent: HotspotAgent = self.agent
             got = await common.receive(self, timeout=agent.receive_timeout_s)
             if got is None:
                 return
-            _, performative, body = got
+            msg, performative, body = got
             if performative == ontology.INFORM and body.get("type") == "risk_record":
-                agent.process_risk_record(body)
+                agent.process_risk_record(body, msg.thread)
 
     async def setup(self):
         self.add_behaviour(self.ReceiveRiskRecords())

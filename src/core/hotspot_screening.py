@@ -5,9 +5,10 @@ epidemiological hotspot model. A caller must explicitly configure which
 published WQI tiers trigger the screen and how many consecutive simulated
 months are required. No scientific cutoff is supplied by this module.
 
-The shared ontology has no hotspot message type, so this module returns an
-internal result. ``alert_hotspot`` is ``None`` when screening is unavailable;
-callers must not turn missing evidence into ``False``.
+This pure module returns an internal result; the SPADE ``HotspotAgent`` adapts
+it to the strict ``hotspot_result`` ontology body. ``alert_hotspot`` is
+``None`` when screening is unavailable; callers must not turn missing evidence
+into ``False``.
 """
 
 from __future__ import annotations

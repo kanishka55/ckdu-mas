@@ -54,11 +54,12 @@ The proposed runner should use this sequence, with path arguments injected into 
    starts the production-style SPADE agents, including `HotspotAgent`, using its own fresh output
    root. If pandas or the method/input is unavailable in the standalone demo, risk and well score
    files have headers only and the manifest records the scoring stage as unavailable.
-4. Pass risk output and the explicit hotspot result to `AlertAgent.process_risk_record()`. Its
-   existing input seam requires a boolean hotspot value; `None` means unavailable and must prevent
-   a sent alert. Current alert wording supports `Excellent`, `Good`, and `Poor`; `Very Poor` and
-   `Unsuitable` remain non-deliverable until a policy is approved. `Unknown` remains non-deliverable
-   and must never be mapped to a safe tier.
+4. The live SPADE `AlertProcessingAgent` receives scorer risk copies and typed hotspot results. It
+   pairs only matching division, `month_index`, and source thread, then delegates policy and
+   suppression to `AlertAgent.process_risk_record()`. Unavailable hotspot evidence and `Unknown`
+   remain non-deliverable. Current wording supports `Excellent`, `Good`, and `Poor`; `Very Poor` and
+   `Unsuitable` remain unavailable pending policy approval. Issued alerts go to a run-local
+   simulated inbox, not a deployed health-officer endpoint.
 5. The runner invokes `src/core/local_allocation.py` for illustrative detailed decisions. It does not
    write the evaluator's team `allocations.csv` format or claim to execute Member C's full protocol.
 6. The runner invokes `src/sim/evaluate.evaluate()` with demo message and summary paths, but leaves
@@ -70,20 +71,19 @@ The proposed runner should use this sequence, with path arguments injected into 
 
 ### Hotspot screening
 
-`src/agents/hotspot.py` now subscribes to the scorer's existing typed `risk_record` fan-out and
-reuses `src/core/hotspot_screening.py`. It stores history by division and simulated month, rejects
-duplicates and out-of-order records, and uses the helper's explicit unavailable states for gaps,
-Unknown values, and insufficient history. Its run-local output is structured screening data, not an
-ontology message: the shared ontology has no hotspot-result type, and `well_risk` is an input detail
-message. This is a project-defined screening rule, not a validated medical or epidemiological
-model. Member B and the project owner still need to review the rule's inputs, decision logic, output
-semantics, and handling of incomplete evidence before treating it as a team policy.
+`src/agents/hotspot.py` subscribes to the scorer's typed `risk_record` fan-out and reuses
+`src/core/hotspot_screening.py`. It stores history by division and simulated month, rejects
+duplicates and out-of-order records, and returns unavailable for gaps, Unknown values, and
+insufficient history. The strict `inform` `hotspot_result` body is implemented in
+`src/core/ontology.py`: `month_index:int`, `ds_division:str`, `status` (`active` | `inactive` |
+`unavailable`), `rule_id:str|null`, `evidence_month_indexes:list[int]`, and `reason:str|null`.
+This transport extension supports the live local simulation; Member B review is still needed for
+the screening semantics. The rule is not a validated medical or epidemiological model.
 
-If downstream agents later require a transported result, the smallest proposed ontology addition is
-an `inform` message of type `hotspot_result` with `month_index:int`, `ds_division:str`,
-`status:str` (`active` | `inactive` | `unavailable`), `rule_id:str|null`,
-`evidence_month_indexes:list[int]`, and `reason:str|null`. This proposal is not implemented or
-approved; the current agent persists its `ScreeningResult` data only in the isolated run artifact.
+The live alert adapter sends typed `alert` messages to a run-local inbox and accepts typed
+`alert_ack` messages (`month_index`, `ds_division`) on the same thread. The inbox acknowledgement
+confirms receipt by that local process only, not a real health officer or external service. Message
+logs continue to use the shared seven-column schema and record sent/received message copies.
 
 ### Contract Net and baselines
 

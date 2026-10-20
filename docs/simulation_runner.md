@@ -2,7 +2,8 @@
 
 `python -m src.sim.runner` advances the existing SPADE agents one month at a time. It starts
 `WellMonitorAgent`, `RiskScoringAgent`, one `VillageAgent` for each division in the configured
-sampling-design file, a run-local risk-record collector, `HotspotAgent`, and `ClockAgent`. For each tick, the runner
+sampling-design file, a run-local risk-record collector, `HotspotAgent`, `AlertProcessingAgent`,
+`AlertInboxAgent`, and `ClockAgent`. For each tick, the runner
 waits for the monitor, scorer, collector, and every village to show current-month state before it
 starts the existing single-round `ResourceCoordinatorAgent`. If current-month risk delivery is
 incomplete, that month's Contract Net round is skipped; the runner does not allow villages to bid
@@ -28,22 +29,25 @@ non-empty target. Outputs include:
   correlation remain unavailable.
 - `rounds/month_index_XXXX_round_N.json`: one result from the existing bounded SPADE coordinator per
   completed month.
-- `risk_records.json`, `hotspot_screening.json`, `alert_decisions.json`: typed risk records and
-  outputs from the live hotspot subscriber and the alert decision function.
+- `risk_records.json`, `hotspot_screening.json`, `alert_decisions.json`: typed risk records,
+  screening results, policy decisions, and alert transport states.
 
-`RiskScoringAgent` sends independent `risk_record` copies to the collector and the configured
-`HotspotAgent` subscriber, in addition to the division's VillageAgent. The hotspot agent reuses the
-pure screening helper and writes `hotspot_screening.json` as run-local structured output. The
-shared ontology has no hotspot-result message type; `well_risk` is an input detail message and is
-not repurposed. Duplicate, gapped, out-of-order, malformed, missing, or Unknown evidence remains
-unavailable. The configurable rule is project-defined screening, not a validated medical or
-epidemiological model.
+`RiskScoringAgent` sends independent `risk_record` copies to the collector, `HotspotAgent`, and
+`AlertProcessingAgent`, in addition to each division's `VillageAgent`. The hotspot agent reuses the
+pure screening helper, persists `hotspot_screening.json`, and sends an ontology-validated
+`hotspot_result` on the matching risk thread. The alert processor requires matching division,
+`month_index`, and thread before applying the existing decision/suppression helper. An issued typed
+`alert` goes to the run-local `AlertInboxAgent`, which responds with `alert_ack` on the same thread.
+The acknowledgement confirms receipt at that local process only, not at a real health-officer
+endpoint. The new `hotspot_result` and `alert_ack` schemas use the existing `inform` performative;
+they do not alter the logger's seven columns. Duplicate, gapped, out-of-order, malformed, missing,
+or Unknown evidence remains unavailable. The configurable rule is project-defined screening, not a
+validated medical or epidemiological model.
 
-This runner does not implement live SPADE alert transport, multi-round Contract Net convergence,
-or an Agent Monitor. The alert code is a decision function; its issued-alert log rows do not
-establish that a live health-officer endpoint received them. Alert tiers without an approved policy
-remain unavailable. WQI uses the project's reduced parameter set and is not diagnostic or causal
-evidence about CKDu.
+This runner implements local SPADE alert transport to its simulated inbox, but not a deployed
+health-officer endpoint, multi-round Contract Net convergence, or an Agent Monitor. Alert tiers
+without an approved policy remain unavailable. WQI uses the project's reduced parameter set and is
+not diagnostic or causal evidence about CKDu.
 
 Example: two simulated months, with explicit calendar labels and a fresh output path:
 
@@ -56,6 +60,8 @@ python -m src.sim.runner \
 
 For a configured screening rule, provide both `--hotspot-trigger-tier` (repeatable) and
 `--hotspot-consecutive-months`. `--hotspot-id` selects the agent identity, and
-`--hotspot-stage-timeout` configures the finite wait for its current-month risk fan-out. No screening
-rule is enabled by default. Do not use the generated round outcomes as verified Member C or team
-allocation results until their provenance is reviewed.
+`--hotspot-stage-timeout` configures the finite wait for its current-month risk fan-out.
+`--alert-processing-id`, `--alert-inbox-id`, `--alert-receive-timeout`, `--alert-stage-timeout`,
+and `--alert-acknowledgement-timeout` configure the local alert lifecycle. No screening rule is
+enabled by default. Do not use the generated round outcomes as verified Member C or team allocation
+results until their provenance is reviewed.

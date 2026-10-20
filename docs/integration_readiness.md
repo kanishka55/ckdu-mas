@@ -46,6 +46,13 @@ all team components pass end to end.
   and `Poor`; `Very Poor`, `Unsuitable`, and `Unknown` remain unavailable
   pending policy agreement. Missing hotspot status is unavailable, never
   inferred as inactive.
+- The live runner uses `AlertProcessingAgent` and `AlertInboxAgent`. It pairs
+  scorer `risk_record` and `hotspot_result` by division, `month_index`, and
+  matching source thread. The strict ontology `hotspot_result` schema uses
+  `inform`, as does `alert_ack`. The local inbox acknowledgement confirms
+  receipt by that process only; no real health-officer transport endpoint is
+  configured. Policy decisions, requested/sent/confirmed/failed delivery events,
+  suppression, and unavailable results are recorded in isolated run output.
 - The evaluator reads the seven-column logger schema and validates typed
   payloads. Alert latency requires a received `risk_record` and a sent `alert`
   paired by exact `thread_id`, `ds_division`, and `month_index`. It does not
@@ -71,9 +78,9 @@ all team components pass end to end.
 | Owner | Confirm before integration |
 |---|---|
 | **A** | Confirm stable `ds_division`, source labels, and the reading schema published by `src/core/wells.py`/`src/sim/load_data.py`. Confirm the existing simulated-month-to-season mapping and keep `month_index` distinct from calendar `month`. Confirm provenance for population, distance, and approximate division-town coordinates in the sampling-design input. The logger direction identifies sent/received message rows, but its timestamp is append time; agree how actual reading-arrival time will be represented if latency is needed. |
-| **B** | Confirm the current typed `risk_record` contract: `month_index:int`, `ds_division:str`, `wqi:number|null`, `tier:str`, `drivers:list`; confirm tier vocabulary, source handling, and driver interpretation. Review the new HotspotAgent's run-local result fields (`status`, `ds_division`, `month_index`, `rule_id`, `evidence_month_indexes`, `reason`) and its project-defined, non-epidemiological semantics; the shared ontology has no hotspot-result message type. Agree whether and how the result may map to the alert agent's boolean-or-unavailable input. Agree a sourced reference-tier mapping for risk alignment; none is inferred by the evaluator. Confirm alert wording/policy for `Very Poor`, `Unsuitable`, and `Unknown` before making those tiers deliverable. |
+| **B** | Confirm the current typed `risk_record` contract: `month_index:int`, `ds_division:str`, `wqi:number|null`, `tier:str`, `drivers:list`; confirm tier vocabulary, source handling, and driver interpretation. Review the implemented strict `hotspot_result` ontology body (`month_index`, `ds_division`, `status`, `rule_id`, `evidence_month_indexes`, `reason`) and its project-defined, non-epidemiological semantics. Confirm that matching source thread plus division/month is an acceptable risk-to-hotspot correlation rule. Agree a sourced reference-tier mapping for risk alignment; none is inferred by the evaluator. Confirm alert wording/policy for `Very Poor`, `Unsuitable`, and `Unknown` before making those tiers deliverable. |
 | **C** | Confirm the evaluator's allocation CSV contract exactly: `month,resource,ds_division,round,winning_bid,method`, with `contract_net`, `equal_split`, and `first_come` method labels. Supply comparable outputs for all methods or an agreed unavailable representation, along with population and numeric risk-weight inputs/provenance. Agree the definition of risk-weighted population served and how allocation results are attested as verified. Provide complete, consistently threaded negotiation logs if negotiation metrics are to be reported. |
-| **All** | Confirm `alert → inform` as the provisional performative mapping, and review the current typed schemas and payloads before treating them as a frozen team contract. Agree a risk-receipt/alert correlation convention that can be represented by the current `thread_id`, division, and `month_index` fields. Confirm that only sent issued alerts count as delivered alerts; alert suppression is currently internal and produces no message-log audit row. |
+| **All** | Confirm `alert → inform` and the additive `hotspot_result`/`alert_ack` `inform` mappings before treating them as frozen team contracts. Agree a risk-receipt/alert correlation convention for evaluator latency: input evidence is paired internally by exact source thread/division/month, while outgoing alert threads identify an alert attempt. Confirm that only sent issued alerts count as sent; local inbox acknowledgement is not real recipient delivery, and suppression remains internal rather than a message-log row. |
 
 ### Known incompatibilities and smallest proposed fixes
 
@@ -86,11 +93,11 @@ all team components pass end to end.
    convention and ensure risk receipt and alert issue timestamps have the
    intended meaning before reporting latency. Do not infer correlation from
    row proximity or sample-collection time.
-2. **Hotspot adapter is provisional.** The local project-defined screening
-   module is not Member B's HotspotAgent and is not validated epidemiological
-   evidence. Member B should publish the output schema and status semantics.
-   Missing or `Unknown` input remains unavailable; it must not become
-   `False`.
+2. **Hotspot semantics remain provisional.** The live `hotspot_result`
+   transport schema is implemented, but the local project-defined screening
+   module is not validated epidemiological evidence. Member B should review its
+   output status semantics and the exact risk-to-result correlation. Missing
+   or `Unknown` input remains unavailable; it must not become `False`.
 3. **Reference alignment is unresolved.** Existing division prevalence
    classes and district aggregates do not by themselves define an agreed
    reference risk tier for each division. Supply and document a sourced

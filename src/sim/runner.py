@@ -1,9 +1,8 @@
 """Lifecycle-safe, month-stepped SPADE simulation runner.
 
 This runs the existing WellMonitorAgent, RiskScoringAgent, VillageAgents,
-HotspotAgent, and single-round ResourceCoordinatorAgent. Alert decisions still
-use the existing pure interface, not live SPADE transport. All outputs and
-message logs are isolated under a fresh output root.
+HotspotAgent, alert processor/local inbox, and single-round ResourceCoordinatorAgent.
+All outputs and message logs are isolated under a fresh output root.
 """
 from __future__ import annotations
 
@@ -25,7 +24,7 @@ from spade.agent import Agent
 from spade.behaviour import CyclicBehaviour
 
 from src.agents import common
-from src.agents.alert import AlertAgent
+from src.agents.alert_spade import AlertInboxAgent, AlertProcessingAgent
 from src.agents.clock import ClockAgent
 from src.agents.hotspot import HotspotAgent
 from src.agents.resource_coordinator import ResourceCoordinatorAgent
@@ -52,12 +51,15 @@ class AgentIdentityConfig:
     well_monitor: str = "well_monitor"
     risk_scoring: str = "risk_scoring"
     hotspot: str = "hotspot"
+    alert_processing: str = "alert_processing"
+    alert_inbox: str = "alert_inbox"
     risk_observer_prefix: str = "risk_observer"
     coordinator_prefix: str = "coordinator_m"
     village_prefix: str = "village_"
 
     def __post_init__(self) -> None:
-        values = (self.clock, self.well_monitor, self.risk_scoring, self.hotspot, self.risk_observer_prefix,
+        values = (self.clock, self.well_monitor, self.risk_scoring, self.hotspot,
+                  self.alert_processing, self.alert_inbox, self.risk_observer_prefix,
                   self.coordinator_prefix, self.village_prefix)
         if any(not isinstance(value, str) or not value.strip() or "@" in value for value in values):
             raise ValueError("agent identity local parts/prefixes must be non-empty and omit @domain")
@@ -78,6 +80,9 @@ class SimulationConfig:
     confirmation_timeout_s: float = 5.0
     stage_timeout_s: float = 45.0
     hotspot_stage_timeout_s: float = 5.0
+    alert_receive_timeout_s: float = 0.2
+    alert_stage_timeout_s: float = 5.0
+    alert_acknowledgement_timeout_s: float = 2.0
     clock_send_timeout_s: float = 10.0
     domain: str = "localhost"
     embedded_server: bool = False
@@ -102,6 +107,8 @@ class SimulationConfig:
             raise ValueError(f"resource must be one of {sorted(ontology.RESOURCES)}")
         for name in ("proposal_timeout_s", "confirmation_timeout_s", "stage_timeout_s",
                      "hotspot_stage_timeout_s",
+                     "alert_receive_timeout_s", "alert_stage_timeout_s",
+                     "alert_acknowledgement_timeout_s",
                      "clock_send_timeout_s"):
             value = getattr(self, name)
             if (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -241,6 +248,17 @@ async def _wait_for_hotspot_month(
     return expected.issubset(hotspot.results_by_key)
 
 
+async def _wait_for_alert_month(month_index: int, divisions: Sequence[str],
+                                alert_agent: AlertProcessingAgent, timeout_s: float) -> bool:
+    expected = {(division, month_index) for division in divisions}
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if expected.issubset(alert_agent.decision_keys):
+            return True
+        await asyncio.sleep(0.02)
+    return expected.issubset(alert_agent.decision_keys)
+
+
 def _read_message_counts(path: Path) -> dict[str, Any]:
     by_direction: Counter[str] = Counter()
     by_performative: Counter[str] = Counter()
@@ -273,8 +291,8 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
     months: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
     risk_records: list[dict[str, Any]] = []
-    alert_rows: list[dict[str, Any]] = []
     hotspot_agent: HotspotAgent | None = None
+    alert_agent: AlertProcessingAgent | None = None
     manifest: dict[str, Any] = {
         "schema_version": 1,
         "run_id": run_id,
@@ -290,7 +308,7 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             "ckdu_diagnostic_or_causal_claim": False,
             "contract_net": "existing single-round SPADE coordinator; not a multi-round convergence implementation",
             "hotspot": "project-defined screening only; not a validated medical or epidemiological model",
-            "alerts": "existing AlertAgent decision function; no live SPADE alert transport",
+            "alerts": "typed SPADE flow to run-local simulated inbox; not a real health-officer endpoint",
         },
         "configuration": {
             "start_month_index": config.start_month_index,
@@ -303,6 +321,9 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             "confirmation_timeout_s": config.confirmation_timeout_s,
             "stage_timeout_s": config.stage_timeout_s,
             "hotspot_stage_timeout_s": config.hotspot_stage_timeout_s,
+            "alert_receive_timeout_s": config.alert_receive_timeout_s,
+            "alert_stage_timeout_s": config.alert_stage_timeout_s,
+            "alert_acknowledgement_timeout_s": config.alert_acknowledgement_timeout_s,
             "domain": config.domain,
             "embedded_server": config.embedded_server,
             "output_dir": str(output_root),
@@ -311,6 +332,8 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 "well_monitor": config.agent_identities.well_monitor,
                 "risk_scoring": config.agent_identities.risk_scoring,
                 "hotspot": config.agent_identities.hotspot,
+                "alert_processing": config.agent_identities.alert_processing,
+                "alert_inbox": config.agent_identities.alert_inbox,
                 "risk_observer_prefix": config.agent_identities.risk_observer_prefix,
                 "coordinator_prefix": config.agent_identities.coordinator_prefix,
                 "village_prefix": config.agent_identities.village_prefix,
@@ -368,10 +391,25 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         hotspot_agent = HotspotAgent(
             hotspot_jid, config.password, divisions=divisions, rule=config.hotspot_rule,
             output_path=output_root / "hotspot_screening.json", receive_timeout_s=0.25,
+            result_recipient_jid=_jid(config.agent_identities.alert_processing, config.domain),
         )
+        alert_processor_jid = _jid(config.agent_identities.alert_processing, config.domain)
+        alert_inbox_jid = _jid(config.agent_identities.alert_inbox, config.domain)
+        alert_agent = AlertProcessingAgent(
+            alert_processor_jid, config.password, divisions=divisions,
+            recipient_jid=alert_inbox_jid, risk_sender_jid=scorer_jid,
+            hotspot_sender_jid=hotspot_jid,
+            output_path=output_root / "alert_decisions.json",
+            receive_timeout_s=config.alert_receive_timeout_s,
+            acknowledgement_timeout_s=config.alert_acknowledgement_timeout_s,
+        )
+        alert_inbox = AlertInboxAgent(alert_inbox_jid, config.password,
+                                      allowed_sender=alert_processor_jid,
+                                      receive_timeout_s=config.alert_receive_timeout_s)
         scorer = RiskScoringAgent(
             scorer_jid, config.password,
-            subscribers=[collector_jid, hotspot_jid], hotspot_subscribers=[], village_jids=village_jids,
+            subscribers=[collector_jid, hotspot_jid, alert_processor_jid],
+            hotspot_subscribers=[], village_jids=village_jids,
             method=method, classes=classes,
         )
         monitor = WellMonitorAgent(monitor_jid, config.password, monthly, divisions,
@@ -379,15 +417,13 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         clock = ClockAgent(clock_jid, config.password, recipients=[monitor_jid])
         agents: list[tuple[str, Agent]] = (
             [(f"VillageAgent:{name}", agent) for name, agent in zip(divisions, villages)]
-            + [("RiskRecordCollector", collector), ("HotspotAgent", hotspot_agent),
+            + [("AlertInboxAgent", alert_inbox), ("AlertProcessingAgent", alert_agent),
+               ("RiskRecordCollector", collector), ("HotspotAgent", hotspot_agent),
                ("RiskScoringAgent", scorer),
                ("WellMonitorAgent", monitor), ("ClockAgent", clock)]
         )
         for _name, agent in agents:
             agent.message_log_path = message_log_path
-        alert_agent = AlertAgent(logger=lambda sender, receiver, performative, thread, payload, direction:
-                                 msg_log.log_message(sender, receiver, performative, thread, payload,
-                                                     direction, path=message_log_path))
 
         for name, agent in agents:
             try:
@@ -427,6 +463,28 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                     month_index, divisions, hotspot_agent, config.hotspot_stage_timeout_s,
                 )
             screens = hotspot_agent.finalize_month(month_index)
+            await hotspot_agent.publish_month_results(month_index)
+            alerts_ready = await _wait_for_alert_month(
+                month_index, divisions, alert_agent, config.alert_stage_timeout_s,
+            )
+            if not alerts_ready:
+                alert_agent.finalize_month(month_index)
+            ack_deadline = time.monotonic() + config.alert_acknowledgement_timeout_s
+            while alert_agent.pending_ack and time.monotonic() < ack_deadline:
+                alert_agent.expire_confirmations()
+                await asyncio.sleep(0.02)
+            alert_agent.expire_confirmations(float("inf"))
+            month_alerts = [row for row in alert_agent.records if row.get("month_index") == month_index]
+            month_status["alert_decisions"] = "complete" if alerts_ready else "partially_unavailable"
+            month_status["alert_delivery"] = {
+                "requested": sum(row.get("delivery_status") in {"requested", "sent", "confirmed", "failed"}
+                                  for row in month_alerts),
+                "sent": sum(row.get("delivery_status") in {"sent", "confirmed"} for row in month_alerts),
+                "confirmed_at_local_inbox": sum(row.get("delivery_status") == "confirmed" for row in month_alerts),
+                "failed": sum(row.get("delivery_status") == "failed" for row in month_alerts),
+                "suppressed": sum(row.get("status") == "suppressed" for row in month_alerts),
+                "unavailable": sum(row.get("status") == "unavailable" for row in month_alerts),
+            }
             month_status["hotspot_screening"] = (
                 "complete" if hotspot_received and all(s.status != "unavailable" for s in screens)
                 else "partially_unavailable"
@@ -434,7 +492,6 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             if not risk_ready:
                 month_status.update(status="incomplete", risk_delivery="unavailable", reason=reason,
                                     contract_net="skipped_missing_current_month_risk")
-                month_status["alert_decisions"] = "unavailable_missing_risk_records"
                 failures.append({"stage": f"month_index={month_index}", "error": reason or "risk delivery failed"})
                 continue
 
@@ -443,20 +500,6 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             if divisions_for_month != set(divisions):
                 month_status.update(status="incomplete", contract_net="skipped_missing_current_month_risk")
                 continue
-
-            screen_by_division = {screen.ds_division: screen for screen in screens}
-            for division in divisions:
-                screen = screen_by_division[division]
-                decision = alert_agent.process_risk_record(
-                    next(record for record in month_records if record["ds_division"] == division),
-                    hotspot=screen.alert_hotspot,
-                )
-                alert_rows.append({"provenance": "local_alert_decision_function_not_live_transport",
-                                   "status": decision.status, "month_index": decision.month_index,
-                                   "ds_division": decision.ds_division, "tier": decision.tier,
-                                   "hotspot": decision.hotspot, "message": decision.message,
-                                   "reason": decision.reason})
-            month_status["alert_decisions"] = "complete"
 
             coordinator_jid = _jid(f"{config.agent_identities.coordinator_prefix}{month_index}", config.domain)
             round_path = round_dir / f"month_index_{month_index:04d}_round_{config.round_number}.json"
@@ -517,8 +560,11 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 any(hotspot_agent.risk_history.values()) or hotspot_agent.rejected_records
             ) else "started_no_risk_records_received"
         )
-        manifest["stage_status"]["alert_decisions"] = "decision_function_only_no_live_spade_transport"
-        manifest["stage_status"]["alert_transport"] = "missing_not_implemented"
+        manifest["stage_status"]["alert_decisions"] = (
+            "processed_typed_risk_and_hotspot_messages" if alert_agent and alert_agent.records
+            else "unavailable_no_paired_evidence"
+        )
+        manifest["stage_status"]["alert_transport"] = "local_simulated_inbox_not_real_health_officer"
         manifest["stage_status"]["contract_net"] = (
             "single_round_per_completed_month" if any(m["contract_net"] not in {
                 "pending", "skipped_missing_current_month_risk", "no_round_result"} for m in months)
@@ -535,7 +581,6 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         else:
             manifest["stage_status"]["risk_score_files"] = "unavailable_no_scored_records"
         _write_json_exclusive(output_root / "risk_records.json", risk_records)
-        _write_json_exclusive(output_root / "alert_decisions.json", alert_rows)
         if config.hotspot_rule is None:
             manifest["stage_status"]["hotspot_screening"] = "unavailable_rule_not_configured"
         results = evaluate(
@@ -569,6 +614,11 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 hotspot_agent.write_output()
             except Exception as exc:
                 failures.append({"stage": "hotspot_output", "error": f"{type(exc).__name__}: {exc}"})
+        if alert_agent is not None:
+            try:
+                alert_agent.write_output()
+            except Exception as exc:
+                failures.append({"stage": "alert_output", "error": f"{type(exc).__name__}: {exc}"})
         manifest["completed_at"] = _utc_now()
         manifest["agent_lifecycle"] = lifecycle
         manifest["month_status"] = months
@@ -619,6 +669,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--well-monitor-id", default="well_monitor")
     parser.add_argument("--risk-scoring-id", default="risk_scoring")
     parser.add_argument("--hotspot-id", default="hotspot")
+    parser.add_argument("--alert-processing-id", default="alert_processing")
+    parser.add_argument("--alert-inbox-id", default="alert_inbox")
+    parser.add_argument("--alert-receive-timeout", type=float, default=0.2)
+    parser.add_argument("--alert-stage-timeout", type=float, default=5.0)
+    parser.add_argument("--alert-acknowledgement-timeout", type=float, default=2.0)
     parser.add_argument("--risk-observer-prefix", default="risk_observer")
     parser.add_argument("--coordinator-prefix", default="coordinator_m")
     parser.add_argument("--village-prefix", default="village_")
@@ -648,6 +703,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         resource=args.resource, resource_pool=args.resource_pool, round_number=args.round_number,
         proposal_timeout_s=args.proposal_timeout, confirmation_timeout_s=args.confirmation_timeout,
         stage_timeout_s=args.stage_timeout, hotspot_stage_timeout_s=args.hotspot_stage_timeout,
+        alert_stage_timeout_s=args.alert_stage_timeout,
+        alert_receive_timeout_s=args.alert_receive_timeout,
+        alert_acknowledgement_timeout_s=args.alert_acknowledgement_timeout,
         domain=args.domain,
         embedded_server=args.embedded_server, password=args.password,
         run_id=args.run_id, input_path=args.input, method_path=args.method,
@@ -655,6 +713,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         agent_identities=AgentIdentityConfig(
             clock=args.clock_id, well_monitor=args.well_monitor_id,
             risk_scoring=args.risk_scoring_id, hotspot=args.hotspot_id,
+            alert_processing=args.alert_processing_id, alert_inbox=args.alert_inbox_id,
             risk_observer_prefix=args.risk_observer_prefix,
             coordinator_prefix=args.coordinator_prefix, village_prefix=args.village_prefix,
         ),

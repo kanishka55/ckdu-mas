@@ -77,7 +77,8 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertTrue(all(month["risk_delivery"] == "complete" for month in result["month_status"]))
             self.assertTrue(all(month["contract_net"] != "pending" for month in result["month_status"]))
             self.assertEqual(result["stage_status"]["hotspot_agent"], "processed_risk_records")
-            self.assertEqual(result["stage_status"]["alert_transport"], "missing_not_implemented")
+            self.assertEqual(result["stage_status"]["alert_transport"],
+                             "local_simulated_inbox_not_real_health_officer")
             self.assertEqual(result["stage_status"]["agent_monitor"], "not_implemented")
             self.assertTrue((output / "logs/messages.csv").is_file())
             self.assertTrue((output / "logs/risk_scores.csv").is_file())
@@ -98,6 +99,8 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             )
             self.assertTrue(alert_decisions)
             self.assertTrue(all(item["status"] == "unavailable" and item["hotspot"] is None
+                                for item in alert_decisions))
+            self.assertTrue(all(item["delivery_status"] == "not_requested"
                                 for item in alert_decisions))
             for index in (0, 1):
                 round_result = json.loads(
@@ -124,6 +127,10 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
                                  and row["direction"] == "sent"
                                  and json.loads(row["payload"]).get("type") == "alert"
                                  for row in rows))
+            self.assertTrue(any(row["performative"] == ontology.INFORM
+                                and row["direction"] == "sent"
+                                and json.loads(row["payload"]).get("type") == "hotspot_result"
+                                for row in rows))
 
             manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest["provenance"]["not_new_monthly_measurements"])
