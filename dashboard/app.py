@@ -48,6 +48,18 @@ WELL_SCORE_REQUIRED = frozenset({
     "month_index", "month", "ds_division", "district", "ckdu_prevalence_class",
     "source", "well_id", "wqi", "tier",
 })
+DEMO_ALLOCATION_COLUMNS = (
+    "provenance", "month_index", "resource", "resource_pool_size", "ds_division",
+    "tier", "population", "method", "status", "units", "bid", "rank", "reason",
+)
+DEMO_HOTSPOT_COLUMNS = (
+    "provenance", "month_index", "ds_division", "rule_id", "status",
+    "evidence_month_indexes", "reason",
+)
+DEMO_ALERT_COLUMNS = (
+    "provenance", "month_index", "ds_division", "tier", "hotspot_status",
+    "status", "reason", "message", "payload",
+)
 
 
 @dataclass(frozen=True)
@@ -67,7 +79,7 @@ class DashboardData:
     team_risks: tuple[dict[str, str], ...]
     team_risk_status: str
     team_risk_source_label: str
-    team_wells: tuple[dict[str, str], ...]
+    team_wells: Dataset
     team_well_status: str
     team_well_source_label: str
     team_allocations: tuple[AllocationRow, ...]
@@ -77,6 +89,53 @@ class DashboardData:
     demo_allocations: tuple[AllocationRow, ...]
     demo_metrics: tuple[MetricResult, ...]
     demo_status: str
+
+
+@dataclass(frozen=True)
+class LocalDemoData:
+    """Generated local-demo artifacts, loaded independently of team output paths."""
+
+    root: Path
+    manifest: Mapping[str, Any] | None
+    manifest_status: str
+    divisions: Dataset
+    risks: Dataset
+    hotspots: Dataset
+    allocations: Dataset
+    alerts: Dataset
+    metrics: Dataset
+
+
+def load_local_demo_data(output_root: str | Path) -> LocalDemoData:
+    """Load only generated demo artifacts beneath the explicitly selected root."""
+    root = Path(output_root).expanduser()
+    manifest: Mapping[str, Any] | None = None
+    try:
+        parsed = json.loads((root / "provenance.json").read_text(encoding="utf-8"))
+        if not isinstance(parsed, dict) or parsed.get("provenance") != "illustrative_local_demo":
+            raise ValueError("manifest provenance is not illustrative_local_demo")
+        manifest = parsed
+        manifest_status = "Available: illustrative local-demo provenance manifest"
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        manifest_status = f"Unavailable or incomplete manifest: {exc}"
+    risks_raw = _read_csv(root / "logs/risk_scores.csv", source_label="Synthetic local-demo risk scores")
+    risks = _validate_indexed_scores(risks_raw, RISK_SCORE_REQUIRED, wells=False)
+    return LocalDemoData(
+        root=root,
+        manifest=manifest,
+        manifest_status=manifest_status,
+        divisions=_read_csv(root / "division_points.csv", DIVISION_COLUMNS,
+                            "Published division coordinates copied into the local demo; approximate town points"),
+        risks=risks,
+        hotspots=_read_csv(root / "hotspot_screening.csv", DEMO_HOTSPOT_COLUMNS,
+                            "Illustrative project-defined hotspot screening"),
+        allocations=_read_csv(root / "allocation_decisions.csv", DEMO_ALLOCATION_COLUMNS,
+                              "Illustrative local allocation; not Member C or verified team output"),
+        alerts=_read_csv(root / "alerts.csv", DEMO_ALERT_COLUMNS,
+                         "Illustrative local alert decisions; only emitted alerts are logged"),
+        metrics=_read_csv(root / "logs/evaluation_summary.csv", EVALUATION_COLUMNS,
+                          "Evidence-gated local demo evaluator summary"),
+    )
 
 
 def _read_csv(path: str | Path, expected_columns: Sequence[str] | None = None,
@@ -252,7 +311,7 @@ def load_dashboard_data(
         risk_dataset.rows,
         _dataset_status(risk_dataset),
         risk_dataset.source_label,
-        well_dataset.rows,
+        well_dataset,
         _dataset_status(well_dataset),
         well_dataset.source_label,
         allocations,
@@ -406,6 +465,24 @@ def prepare_evaluation_display(
     return f"Available: {len(output)} evaluation metric rows from {dataset.source_label}.", tuple(output)
 
 
+def _render_evaluation_summary(
+    st: Any, dataset: Dataset, *, allocation_results_verified: bool = False,
+    context: str = "",
+) -> None:
+    """Render the evaluation status once, or the available summary rows."""
+    status, rows = prepare_evaluation_display(
+        dataset, allocation_results_verified=allocation_results_verified,
+    )
+    st.subheader("Evaluation summary")
+    if context:
+        st.caption(context)
+    if rows:
+        st.caption(status)
+        st.dataframe(list(rows), use_container_width=True)
+    else:
+        st.info(status)
+
+
 def _show_map(st: Any, divisions: Dataset, risk_records: Sequence[Mapping[str, Any]]) -> None:
     points = _valid_coordinates(divisions.rows)
     if not points:
@@ -469,6 +546,14 @@ def _show_risks(st: Any, records: Sequence[Mapping[str, Any]], status: str,
     st.dataframe(display, use_container_width=True)
 
 
+def _show_demo_rows(st: Any, rows: Sequence[Mapping[str, Any]], empty_message: str) -> None:
+    """Render demo records or an explicit empty state via ordinary Streamlit calls."""
+    if rows:
+        st.dataframe(list(rows), use_container_width=True)
+    else:
+        st.info(empty_message)
+
+
 def _show_allocations(st: Any, rows: Sequence[AllocationRow], month: int | None,
                       metrics: Sequence[MetricResult] = (), label: str = "") -> None:
     if label:
@@ -495,6 +580,68 @@ def _show_allocations(st: Any, rows: Sequence[AllocationRow], month: int | None,
     } for m in month_results], use_container_width=True)
 
 
+def _render_local_demo(st: Any, output_root: Path) -> None:
+    """Render generated artifacts without loading or relabeling team outputs."""
+    demo = load_local_demo_data(output_root)
+    st.subheader("Generated local demo")
+    st.warning("Synthetic and illustrative simulation outputs; not verified team results or measured observations.")
+    st.caption(demo.manifest_status)
+    if demo.manifest is not None:
+        stages = demo.manifest.get("stages", {})
+        st.caption(f"Risk-scoring stage: {stages.get('risk_scoring', 'status unavailable')}")
+        st.caption("The input has seasonal readings expanded by the documented rule; repeated rows are not new monthly measurements.")
+        st.caption("Reduced-parameter WQI is not directly comparable with a full 13-parameter WQI.")
+        st.caption(str(demo.manifest.get("policies", {}).get("hotspot", {}).get(
+            "status", "Hotspot rule provenance unavailable.")))
+        st.caption(str(demo.manifest.get("policies", {}).get("allocation", {}).get(
+            "implementation", "Allocation implementation provenance unavailable.")))
+
+    months = sorted({int(row["month_index"]) for row in demo.risks.rows
+                     if row.get("month_index", "").isdigit()})
+    selected = st.selectbox("Simulated month_index", months if months else
+                            ["Unavailable — no risk month_index"], disabled=not months)
+    month_index = selected if isinstance(selected, int) else None
+    selected_risks = [row for row in demo.risks.rows
+                      if month_index is not None and row.get("month_index") == str(month_index)]
+    left, right = st.columns((3, 2))
+    with left:
+        st.subheader("Division risk map")
+        _show_map(st, demo.divisions, selected_risks)
+        st.caption("Map coordinates are approximate division town points, not well GPS locations.")
+    with right:
+        st.subheader("Risk tiers and drivers")
+        _show_risks(st, demo.risks.rows, f"{demo.risks.source_label}: {demo.risks.message}", month_index)
+
+    st.subheader("Project-defined hotspot screening")
+    st.caption("This illustrative screening indicator is not validated medical or epidemiological evidence. Missing/Unknown input remains unavailable.")
+    if demo.hotspots.status == "available" and month_index is not None:
+        rows = [row for row in demo.hotspots.rows if row.get("month_index") == str(month_index)]
+        _show_demo_rows(st, rows, "No hotspot rows for the selected simulated month_index.")
+    else:
+        st.info(f"{demo.hotspots.status.title()}: {demo.hotspots.message}")
+
+    st.subheader("Illustrative local allocation decisions")
+    st.caption(f"{demo.allocations.source_label}. These rows are not Member C outputs and do not establish verified allocation efficiency.")
+    if demo.allocations.status == "available" and month_index is not None:
+        rows = [row for row in demo.allocations.rows if row.get("month_index") == str(month_index)]
+        _show_demo_rows(st, rows, "No allocation rows for the selected simulated month_index.")
+    else:
+        st.info(f"{demo.allocations.status.title()}: {demo.allocations.message}")
+
+    st.subheader("Alert decisions")
+    st.caption("Only emitted decisions are sent alerts. Suppressed and unavailable outcomes are internal decisions.")
+    if demo.alerts.status == "available" and month_index is not None:
+        rows = [row for row in demo.alerts.rows if row.get("month_index") == str(month_index)]
+        _show_demo_rows(st, rows, "No alert decision rows for the selected simulated month_index.")
+    else:
+        st.info(f"{demo.alerts.status.title()}: {demo.alerts.message}")
+
+    _render_evaluation_summary(
+        st, demo.metrics, allocation_results_verified=False,
+        context="Allocation-comparison metrics remain unavailable for illustrative local allocation results.",
+    )
+
+
 def main() -> None:
     try:
         import streamlit as st
@@ -505,6 +652,16 @@ def main() -> None:
     st.title("CKDu Well-Water Risk-Indicator Support")
     st.warning(DISCLAIMER)
     data_root = Path(os.environ.get("CKDU_DATA_ROOT", ROOT / "data"))
+    demo_output = os.environ.get("CKDU_DEMO_OUTPUT_DIR")
+    views = ("Team outputs", "Illustrative demo fixtures") + (("Generated local demo",) if demo_output else ())
+    default_view = views.index("Generated local demo") if demo_output else 0
+    view = st.radio("Data view", views, index=default_view, horizontal=True)
+    if view == "Generated local demo":
+        _render_local_demo(st, Path(demo_output))
+        with st.expander("Scientific limitations"):
+            st.caption("Water-quality/risk indicators do not diagnose CKDu or establish that water caused CKDu.")
+            st.caption("Approximate division town points are not well locations.")
+        return
     logs_root = Path(os.environ.get("CKDU_LOGS_DIR", ROOT / "logs"))
     data = load_dashboard_data(
         synthetic_wells_path=data_root / "processed/synthetic_wells.csv",
@@ -513,7 +670,6 @@ def main() -> None:
         risk_scores_path=logs_root / "risk_scores.csv", well_scores_path=logs_root / "well_scores.csv",
         allocations_path=logs_root / "allocations.csv", evaluation_path=logs_root / "evaluation_summary.csv",
     )
-    view = st.radio("Data view", ("Team outputs", "Illustrative demo fixtures"), horizontal=True)
     demo = view.startswith("Illustrative")
     risk_months = available_months(data, demo=demo)
     selected_index = st.selectbox("Simulated month index", risk_months if risk_months else
@@ -543,16 +699,10 @@ def main() -> None:
         allocation_label = data.team_allocation_status
 
     if not demo:
-        evaluation_status, evaluation_rows = prepare_evaluation_display(
-            data.team_metrics, allocation_results_verified=False,
+        _render_evaluation_summary(
+            st, data.team_metrics, allocation_results_verified=False,
+            context="Evaluator outputs are reported as recorded; allocation metrics stay unavailable until their inputs and provenance are verified.",
         )
-        st.subheader("Evaluation summary")
-        st.caption("Evaluator outputs are reported as recorded; allocation metrics stay unavailable until their inputs and provenance are verified.")
-        st.caption(evaluation_status)
-        if evaluation_rows:
-            st.dataframe(list(evaluation_rows), use_container_width=True)
-        else:
-            st.info(evaluation_status)
 
     left, right = st.columns((3, 2))
     with left:
@@ -575,7 +725,8 @@ def main() -> None:
     _show_allocations(st, allocations, allocation_month, metrics, allocation_label)
 
     with st.expander("Member B per-well scores"):
-        st.caption(data.team_well_status)
+        if data.team_wells.rows:
+            st.caption(data.team_well_status)
         st.caption(data.team_well_source_label)
         st.caption("Source labels are preserved per row; synthetic scores are not measured observations.")
         if data.team_wells.rows:
@@ -594,12 +745,13 @@ def main() -> None:
             st.info(data.team_well_status)
 
     with st.expander("Synthetic well input observations (seasonal; not monthly risk tiers)"):
-        st.caption(f"{data.synthetic_wells.source_label}. {data.synthetic_wells.message}.")
         if data.synthetic_wells.rows:
+            st.caption(f"{data.synthetic_wells.source_label}. {data.synthetic_wells.message}.")
             seasons = sorted({r["season"] for r in data.synthetic_wells.rows})
             season = st.selectbox("Season", seasons)
             st.dataframe([r for r in data.synthetic_wells.rows if r["season"] == season], use_container_width=True)
         else:
+            st.caption(data.synthetic_wells.source_label)
             st.info(data.synthetic_wells.message)
     with st.expander("Real published reference data"):
         st.caption(data.reference_stats.source_label)

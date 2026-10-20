@@ -78,7 +78,8 @@ class TestMemberDIntegration(unittest.TestCase):
                 allocations_path=root / "absent-allocations.csv",
             )
         self.assertEqual(data.team_risks, ())
-        self.assertEqual(data.team_wells, ())
+        self.assertEqual(data.team_wells.rows, ())
+        self.assertEqual(data.team_wells.status, "unavailable")
         self.assertIn("Unavailable", data.team_risk_status)
         self.assertIn("Unavailable", data.team_well_status)
         self.assertIn("Unavailable", data.team_allocation_status)

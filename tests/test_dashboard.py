@@ -15,6 +15,9 @@ from dashboard.app import (
     prepare_evaluation_display,
     Dataset,
     _valid_coordinates,
+    _show_demo_rows,
+    load_local_demo_data,
+    _render_evaluation_summary,
 )
 
 
@@ -44,7 +47,9 @@ class TestDashboardData(unittest.TestCase):
                 allocations_path=root / "missing-allocations.csv",
             )
         self.assertEqual(data.team_risks, ())
-        self.assertEqual(data.team_wells, ())
+        self.assertIsInstance(data.team_wells, Dataset)
+        self.assertEqual(data.team_wells.rows, ())
+        self.assertEqual(data.team_wells.status, "unavailable")
         self.assertEqual(available_months(data, demo=False), ())
         self.assertIn("unavailable", data.team_risk_status.casefold())
         self.assertIn("unavailable", data.team_well_status.casefold())
@@ -71,7 +76,8 @@ class TestDashboardData(unittest.TestCase):
         self.assertEqual(available_months(data, demo=False), (0,))
         self.assertEqual(data.team_risks[0]["tier"], "Unknown")
         self.assertEqual(data.team_risks[0]["wqi"], "")
-        self.assertEqual(data.team_wells[0]["well_id"], "synthetic-well-1")
+        self.assertIsInstance(data.team_wells, Dataset)
+        self.assertEqual(data.team_wells.rows[0]["well_id"], "synthetic-well-1")
         self.assertIn("Member B", data.team_risk_source_label)
 
     def test_empty_member_b_csvs_are_empty_not_zero_valued(self) -> None:
@@ -83,7 +89,7 @@ class TestDashboardData(unittest.TestCase):
                                         "ckdu_prevalence_class", "source", "well_id", "wqi", "tier"], [])
             data = load_dashboard_data(risk_scores_path=risk_path, well_scores_path=well_path)
         self.assertEqual(data.team_risks, ())
-        self.assertEqual(data.team_wells, ())
+        self.assertEqual(data.team_wells.rows, ())
         self.assertIn("No records", data.team_risk_status)
         self.assertIn("No records", data.team_well_status)
 
@@ -99,7 +105,8 @@ class TestDashboardData(unittest.TestCase):
         self.assertIn("Incomplete", data.team_risk_status)
         self.assertIn("Incomplete", data.team_well_status)
         self.assertEqual(data.team_risks, ())
-        self.assertEqual(data.team_wells, ())
+        self.assertEqual(data.team_wells.rows, ())
+        self.assertEqual(data.team_wells.status, "incomplete")
 
     def test_present_allocation_rows_are_not_claimed_as_verified_team_results(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -161,6 +168,34 @@ class TestDashboardData(unittest.TestCase):
         self.assertIn("Incomplete", prepare_evaluation_display(malformed)[0])
         self.assertEqual(prepare_evaluation_display(malformed)[1], ())
 
+    def test_missing_evaluation_summary_is_rendered_once(self) -> None:
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def subheader(self, value):
+                self.calls.append(("subheader", value))
+
+            def caption(self, value):
+                self.calls.append(("caption", value))
+
+            def info(self, value):
+                self.calls.append(("info", value))
+
+            def dataframe(self, rows, **kwargs):
+                self.calls.append(("dataframe", rows))
+
+        absent = Dataset((), "unavailable", "File not found: evaluation_summary.csv",
+                         "Member D evaluation summary")
+        recorder = Recorder()
+        _render_evaluation_summary(recorder, absent, context="Evaluation source context.")
+
+        message = "Unavailable: File not found: evaluation_summary.csv"
+        rendered = [value for kind, value in recorder.calls if kind in {"caption", "info"}]
+        self.assertEqual(rendered.count(message), 1)
+        self.assertEqual([kind for kind, _ in recorder.calls].count("info"), 1)
+        self.assertEqual([kind for kind, _ in recorder.calls].count("dataframe"), 0)
+
     def test_allocation_metric_month_scope_and_verification_gate(self) -> None:
         dataset = Dataset(({
             "metric": "contract_net_minus_first_come", "scope": "month=2;resource=RO_unit",
@@ -205,12 +240,74 @@ class TestDashboardData(unittest.TestCase):
         )
         self.assertEqual([p["ds_division"] for p in _valid_coordinates(rows)], ["valid"])
 
+    def test_demo_render_helper_renders_table_or_empty_state_without_expression_output(self) -> None:
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def dataframe(self, rows, **kwargs):
+                self.calls.append(("dataframe", rows))
+                return object()
+
+            def info(self, message):
+                self.calls.append(("info", message))
+                return object()
+
+            def write(self, value):
+                self.calls.append(("write", value))
+
+        st = Recorder()
+        self.assertIsNone(_show_demo_rows(st, ({"status": "active"},), "Empty table"))
+        self.assertIsNone(_show_demo_rows(st, (), "Empty table"))
+        self.assertEqual([kind for kind, _value in st.calls], ["dataframe", "info"])
+        self.assertEqual(st.calls[1][1], "Empty table")
+
     def test_repository_division_coordinates_are_approximate_town_points(self) -> None:
         data = load_dashboard_data()
         points = _valid_coordinates(data.divisions.rows)
         self.assertTrue(points)
         self.assertTrue(all("approximate" in point["notes"] for point in points))
         self.assertIn("approximate division town points", data.divisions.source_label)
+
+    def test_generated_demo_loader_is_separate_and_labels_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "logs").mkdir()
+            (root / "provenance.json").write_text(
+                '{"provenance":"illustrative_local_demo","stages":{"risk_scoring":"unavailable"}}',
+                encoding="utf-8",
+            )
+            risk_columns = ["month_index", "month", "ds_division", "source", "wqi", "tier", "drivers"]
+            self._write_csv(root / "logs/risk_scores.csv", risk_columns, [[
+                "0", "10", "Fixture Division", "synthetic", "", "Unknown", "[]",
+            ]])
+            data = load_local_demo_data(root)
+        self.assertEqual(data.manifest["provenance"], "illustrative_local_demo")
+        self.assertEqual(data.risks.rows[0]["tier"], "Unknown")
+        self.assertIn("Synthetic", data.risks.source_label)
+        self.assertEqual(data.allocations.status, "unavailable")
+        self.assertEqual(data.metrics.status, "unavailable")
+        self.assertEqual(data.divisions.status, "unavailable")
+
+    def test_generated_demo_loader_reports_malformed_empty_and_missing_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "logs").mkdir()
+            (root / "logs/risk_scores.csv").write_text("month_index,ds_division\nbad,Fixture\n", encoding="utf-8")
+            (root / "hotspot_screening.csv").write_text("wrong,header\nx,y\n", encoding="utf-8")
+            data = load_local_demo_data(root)
+        self.assertEqual(data.risks.status, "incomplete")
+        self.assertIn("Unexpected columns", data.hotspots.message)
+        self.assertEqual(data.alerts.status, "unavailable")
+
+    def test_generated_demo_allocation_summary_is_not_verified(self) -> None:
+        dataset = Dataset(({
+            "metric": "allocation_efficiency", "scope": "all", "value": "100",
+            "unit": "risk-weighted persons", "status": "ok", "observations": "1", "details": "{}",
+        },), "available", "1 row", "local illustrative evaluator fixture")
+        _, rows = prepare_evaluation_display(dataset, allocation_results_verified=False)
+        self.assertEqual(rows[0]["Value"], "Unavailable")
+        self.assertEqual(rows[0]["Status"], "unavailable")
 
 
 if __name__ == "__main__":

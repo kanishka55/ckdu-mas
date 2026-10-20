@@ -1,0 +1,47 @@
+services:
+  demo-runner:
+    image: ckdu-mas-demo:local
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - python
+      - -m
+      - src.sim.run_local_demo
+      - --output-dir
+      - /app/demo_output
+      - --months
+      - "12"
+      - --start-month
+      - "10"
+      - --resource
+      - RO_unit
+      - --pool-size
+      - "3"
+    environment:
+      CKDU_DEMO_OUTPUT_DIR: /app/demo_output
+    volumes:
+      - "${CKDU_DEMO_HOST_DIR:-./demo_output}:/app/demo_output"
+    init: true
+
+  dashboard:
+    image: ckdu-mas-demo:local
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - streamlit
+      - run
+      - dashboard/app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+    environment:
+      CKDU_DEMO_OUTPUT_DIR: /app/demo_output
+    volumes:
+      - "${CKDU_DEMO_HOST_DIR:-./demo_output}:/app/demo_output"
+    ports:
+      - "8501:8501"
+    init: true
+    restart: unless-stopped
