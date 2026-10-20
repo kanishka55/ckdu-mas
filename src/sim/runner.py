@@ -205,6 +205,25 @@ def _rewrite_owned_json(path: Path, value: Any) -> None:
         stream.write("\n")
 
 
+def _append_monitor_event(path: Path, event_type: str, component: str, *,
+                          identity: str | None = None, **details: Any) -> None:
+    """Append one observed runner/lifecycle event to the isolated run journal."""
+    row = {"timestamp": _utc_now(), "event_type": event_type, "component": component}
+    if identity is not None:
+        row["identity"] = identity
+    row.update(details)
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+        stream.flush()
+
+
+async def _monitor_heartbeat(path: Path) -> None:
+    """Provide process-level freshness evidence while the runner event loop remains alive."""
+    while True:
+        await asyncio.sleep(2.0)
+        _append_monitor_event(path, "heartbeat", "SimulationRunner")
+
+
 async def _wait_for_month(
     month_index: int,
     divisions: Sequence[str],
@@ -282,8 +301,11 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
     output_root = validate_output_dir(config.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     log_path = output_root / "logs/messages.csv"
+    event_path = output_root / "agent_events.jsonl"
     round_dir = output_root / "rounds"
     round_dir.mkdir(parents=True, exist_ok=True)
+    with event_path.open("x", encoding="utf-8", newline="\n"):
+        pass
     run_id = config.run_id
     message_log_path = log_path
     started_agents: list[tuple[str, Agent]] = []
@@ -293,6 +315,7 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
     risk_records: list[dict[str, Any]] = []
     hotspot_agent: HotspotAgent | None = None
     alert_agent: AlertProcessingAgent | None = None
+    heartbeat_task: asyncio.Task | None = None
     manifest: dict[str, Any] = {
         "schema_version": 1,
         "run_id": run_id,
@@ -353,6 +376,17 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
     }
     manifest_path = output_root / MANIFEST_NAME
     _write_json_exclusive(manifest_path, manifest)
+    _append_monitor_event(event_path, "run_started", "SimulationRunner", run_id=run_id)
+    heartbeat_task = asyncio.create_task(_monitor_heartbeat(event_path))
+
+    def record_lifecycle(component: str, event: str, agent: Agent | None = None) -> None:
+        at = _utc_now()
+        identity = str(agent.jid) if agent is not None else None
+        lifecycle.append({"component": component, "event": event, "at": at, **({"jid": identity} if identity else {})})
+        event_names = {"started": "agent_started", "start_failed": "agent_start_failed",
+                       "stopped": "agent_stopped", "stop_failed": "agent_stop_failed"}
+        _append_monitor_event(event_path, event_names[event], component,
+                              identity=identity, lifecycle_state=event)
 
     try:
         monthly = load_data.load_monthly_readings(config.input_path)
@@ -426,14 +460,14 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             agent.message_log_path = message_log_path
 
         for name, agent in agents:
+            _append_monitor_event(event_path, "agent_starting", name, identity=str(agent.jid))
             try:
                 await agent.start(auto_register=True)
             except Exception:
-                lifecycle.append({"component": name, "event": "start_failed", "at": _utc_now()})
+                record_lifecycle(name, "start_failed", agent)
                 raise
             started_agents.append((name, agent))
-            lifecycle.append({"component": name, "event": "started", "at": _utc_now(),
-                              "jid": str(agent.jid)})
+            record_lifecycle(name, "started", agent)
 
         manifest["stage_status"]["risk_scoring"] = "running"
         for month_index in range(config.start_month_index, config.end_month_index + 1):
@@ -449,8 +483,12 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 "contract_net": "pending",
             }
             months.append(month_status)
+            _append_monitor_event(event_path, "month_started", "SimulationRunner",
+                                  month_index=month_index, calendar_month=calendar_month)
             await clock.publish_month(month_index, calendar_month, timeout_s=config.clock_send_timeout_s)
             month_status["clock_tick"] = "published"
+            _append_monitor_event(event_path, "month_stage", "SimulationRunner",
+                                  month_index=month_index, stage="clock_tick", status="published")
             risk_ready, reason = await _wait_for_month(
                 month_index, divisions, monitor, scorer, collector, villages, config.stage_timeout_s,
             )
@@ -464,6 +502,11 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 )
             screens = hotspot_agent.finalize_month(month_index)
             await hotspot_agent.publish_month_results(month_index)
+            for screen in screens:
+                _append_monitor_event(event_path, "hotspot_result", "HotspotAgent",
+                                      identity=hotspot_jid, month_index=month_index,
+                                      ds_division=screen.ds_division, screening_status=screen.status,
+                                      reason=screen.reason)
             alerts_ready = await _wait_for_alert_month(
                 month_index, divisions, alert_agent, config.alert_stage_timeout_s,
             )
@@ -489,9 +532,29 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 "complete" if hotspot_received and all(s.status != "unavailable" for s in screens)
                 else "partially_unavailable"
             )
+            _append_monitor_event(event_path, "month_stage", "SimulationRunner",
+                                  month_index=month_index, stage="risk_delivery",
+                                  status="complete" if risk_ready else "unavailable")
+            _append_monitor_event(event_path, "month_stage", "SimulationRunner",
+                                  month_index=month_index, stage="alert_decisions",
+                                  status=month_status["alert_decisions"],
+                                  delivery=month_status["alert_delivery"])
+            _append_monitor_event(event_path, "month_stage", "SimulationRunner",
+                                  month_index=month_index, stage="hotspot_screening",
+                                  status=month_status["hotspot_screening"])
+            for alert_row in month_alerts:
+                _append_monitor_event(event_path, "alert_outcome", "AlertProcessingAgent",
+                                      identity=alert_processor_jid, month_index=month_index,
+                                      ds_division=alert_row.get("ds_division"),
+                                      decision_status=alert_row.get("status"),
+                                      delivery_status=alert_row.get("delivery_status"),
+                                      reason=alert_row.get("reason"))
             if not risk_ready:
                 month_status.update(status="incomplete", risk_delivery="unavailable", reason=reason,
                                     contract_net="skipped_missing_current_month_risk")
+                _append_monitor_event(event_path, "month_completed", "SimulationRunner",
+                                      month_index=month_index, status="incomplete",
+                                      contract_net=month_status["contract_net"])
                 failures.append({"stage": f"month_index={month_index}", "error": reason or "risk delivery failed"})
                 continue
 
@@ -499,6 +562,9 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             divisions_for_month = {record["ds_division"] for record in month_records}
             if divisions_for_month != set(divisions):
                 month_status.update(status="incomplete", contract_net="skipped_missing_current_month_risk")
+                _append_monitor_event(event_path, "month_completed", "SimulationRunner",
+                                      month_index=month_index, status="incomplete",
+                                      contract_net=month_status["contract_net"])
                 continue
 
             coordinator_jid = _jid(f"{config.agent_identities.coordinator_prefix}{month_index}", config.domain)
@@ -516,12 +582,18 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             coordinator = ResourceCoordinatorAgent(coordinator_jid, config.password, coordinator_config)
             coordinator.message_log_path = message_log_path
             name = f"ResourceCoordinatorAgent:month_index={month_index}:round={config.round_number}"
+            _append_monitor_event(event_path, "agent_starting", name, identity=coordinator_jid)
             try:
                 await coordinator.start(auto_register=True)
             except Exception:
-                lifecycle.append({"component": name, "event": "start_failed", "at": _utc_now()})
+                _append_monitor_event(event_path, "agent_start_failed", name,
+                                      identity=str(coordinator.jid), lifecycle_state="start_failed")
+                lifecycle.append({"component": name, "event": "start_failed", "at": _utc_now(),
+                                  "jid": str(coordinator.jid)})
                 raise
             started_agents.append((name, coordinator))
+            _append_monitor_event(event_path, "agent_started", name, identity=str(coordinator.jid),
+                                  lifecycle_state="started")
             lifecycle.append({"component": name, "event": "started", "at": _utc_now(),
                               "jid": str(coordinator.jid)})
             behaviour = next(iter(coordinator.behaviours))
@@ -536,17 +608,35 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 except Exception as exc:
                     failures.append({"stage": f"shutdown:{name}",
                                      "error": f"{type(exc).__name__}: {exc}"})
-                    lifecycle.append({"component": name, "event": "stop_failed", "at": _utc_now()})
+                    _append_monitor_event(event_path, "agent_stop_failed", name,
+                                          identity=str(coordinator.jid), lifecycle_state="stop_failed")
+                    lifecycle.append({"component": name, "event": "stop_failed", "at": _utc_now(),
+                                      "jid": str(coordinator.jid)})
                 else:
                     started_agents.remove((name, coordinator))
+                    _append_monitor_event(event_path, "agent_stopped", name,
+                                          identity=str(coordinator.jid), lifecycle_state="stopped")
                     lifecycle.append({"component": name, "event": "stopped", "at": _utc_now()})
             if coordinator.round_result is None:
                 month_status.update(status="incomplete", contract_net="no_round_result")
                 failures.append({"stage": name, "error": "coordinator completed without a round result"})
+                _append_monitor_event(event_path, "round_completed", name,
+                                      identity=str(coordinator.jid), month_index=month_index,
+                                      round=config.round_number, award_status="unavailable",
+                                      winner=None, reason="coordinator_completed_without_result")
             else:
                 month_status["contract_net"] = coordinator.round_result["award_status"]
                 month_status["status"] = "complete"
                 manifest["round_result_paths"].append(str(round_path.relative_to(output_root)))
+                _append_monitor_event(event_path, "round_completed", name,
+                                      identity=str(coordinator.jid), month_index=month_index,
+                                      round=config.round_number,
+                                      award_status=coordinator.round_result.get("award_status"),
+                                      winner=coordinator.round_result.get("winner"),
+                                      result_path=str(round_path.relative_to(output_root)))
+            _append_monitor_event(event_path, "month_completed", "SimulationRunner",
+                                  month_index=month_index, status=month_status["status"],
+                                  contract_net=month_status["contract_net"])
 
         manifest["stage_status"]["risk_scoring"] = (
             "complete" if risk_records else "unavailable_no_risk_records"
@@ -570,7 +660,7 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 "pending", "skipped_missing_current_month_risk", "no_round_result"} for m in months)
             else "unavailable_no_completed_rounds"
         )
-        manifest["stage_status"]["agent_monitor"] = "not_implemented"
+        manifest["stage_status"]["agent_monitor"] = "event_journal_and_message_log_available"
 
         if scorer.history:
             risk_outputs.write_outputs(
@@ -596,9 +686,13 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         }
         manifest["message_counts"] = _read_message_counts(log_path)
         manifest["status"] = "completed_with_unavailable_stages"
+        _append_monitor_event(event_path, "run_completed", "SimulationRunner",
+                              status=manifest["status"])
     except Exception as exc:
         failures.append({"stage": "runner", "error": f"{type(exc).__name__}: {exc}"})
         manifest["status"] = "failed"
+        _append_monitor_event(event_path, "run_failed", "SimulationRunner",
+                              status="failed", reason=f"{type(exc).__name__}: {exc}")
         raise
     finally:
         for name, agent in reversed(started_agents):
@@ -606,8 +700,12 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 await agent.stop()
             except Exception as exc:
                 failures.append({"stage": f"shutdown:{name}", "error": f"{type(exc).__name__}: {exc}"})
+                _append_monitor_event(event_path, "agent_stop_failed", name,
+                                      identity=str(agent.jid), lifecycle_state="stop_failed")
                 lifecycle.append({"component": name, "event": "stop_failed", "at": _utc_now()})
             else:
+                _append_monitor_event(event_path, "agent_stopped", name,
+                                      identity=str(agent.jid), lifecycle_state="stopped")
                 lifecycle.append({"component": name, "event": "stopped", "at": _utc_now()})
         if hotspot_agent is not None:
             try:
@@ -632,6 +730,14 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             manifest["stage_status"] = {"runner": "failed_before_agent_start"}
         if not manifest.get("status") or manifest["status"] == "running":
             manifest["status"] = "failed" if failures else "incomplete"
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        _append_monitor_event(event_path, "run_finished", "SimulationRunner",
+                              status=manifest["status"])
         _rewrite_owned_json(manifest_path, manifest)
     return manifest
 

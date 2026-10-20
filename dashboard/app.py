@@ -24,6 +24,7 @@ from src.sim.evaluate import (
     calculate_allocation_efficiency,
     read_allocation_rows,
 )
+from src.sim.agent_monitor import AgentMonitorSnapshot, load_agent_monitor
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -642,6 +643,110 @@ def _render_local_demo(st: Any, output_root: Path) -> None:
     )
 
 
+def _render_agent_monitor_snapshot(st: Any, snapshot: AgentMonitorSnapshot) -> None:
+    st.subheader("Live Agent Monitor")
+    st.caption(f"Run: {snapshot.run_id} · {snapshot.run_dir}")
+    st.caption(f"Source: explicitly selected SPADE simulation run · {snapshot.freshness} · run status: {snapshot.run_status}")
+    if snapshot.freshness == "live":
+        st.success("Run activity is fresh from the runner event journal or directional message log.")
+    elif snapshot.freshness == "stale":
+        st.warning("Run manifest still says running, but no recent heartbeat or message evidence exists. Agent activity is stale/unknown.")
+    elif snapshot.freshness == "failed snapshot":
+        st.error("This run failed. The monitor is showing its persisted failure snapshot.")
+    elif snapshot.freshness == "completed snapshot":
+        st.info("This run is complete; this view is a persisted snapshot, not live agent activity.")
+    else:
+        st.warning("Run freshness is unknown; no active state is inferred.")
+    st.caption(f"Last observed run activity: {snapshot.last_activity or 'Unavailable'}")
+    st.caption("A started SPADE lifecycle event plus a fresh runner heartbeat indicates a running process; this does not health-check each behaviour or prove external XMPP availability.")
+
+    st.markdown("#### Observed agents")
+    if snapshot.agents:
+        st.dataframe(list(snapshot.agents), use_container_width=True)
+    else:
+        st.info("No agent lifecycle identities have been recorded for this run.")
+    with st.expander("Lifecycle events"):
+        if snapshot.lifecycle_events:
+            st.dataframe([{
+                "Time": row.get("timestamp", "Unavailable"),
+                "Component": row.get("component", "Unknown"),
+                "Identity": row.get("identity", "Unavailable"),
+                "Event": row.get("event_type", "Unknown"),
+                "State": row.get("lifecycle_state", "Unavailable"),
+            } for row in snapshot.lifecycle_events], use_container_width=True)
+        else:
+            st.info("No lifecycle events are available.")
+
+    st.markdown("#### Message activity")
+    st.caption(f"Seven-column message log: {snapshot.message_status}. Sent/received counts come from the logger's direction field.")
+    if snapshot.message_counts:
+        st.dataframe(list(snapshot.message_counts), use_container_width=True)
+    else:
+        st.info("No directional message counts are available; an empty log is not evidence of successful communication.")
+    with st.expander("Message flows and recent messages"):
+        if snapshot.flows:
+            st.dataframe(list(snapshot.flows), use_container_width=True)
+        else:
+            st.info("No sender/receiver flows are present in this run log.")
+        if snapshot.messages:
+            st.dataframe([{
+                "Timestamp": row.get("timestamp"), "Sender": row.get("sender"),
+                "Receiver": row.get("receiver"), "Direction": row.get("direction"),
+                "Performative": row.get("performative"), "Message type": row.get("event_type"),
+                "month_index": row.get("month_index"), "Division": row.get("ds_division"),
+                "Payload validation": row.get("payload_status"),
+            } for row in snapshot.messages], use_container_width=True)
+        else:
+            st.info("No recent messages are available.")
+
+    st.markdown("#### Month progression and Contract Net")
+    if snapshot.months:
+        st.dataframe(list(snapshot.months), use_container_width=True)
+    else:
+        st.info("No month progression events are available yet.")
+    if snapshot.rounds:
+        st.dataframe([{
+            "month_index": row.get("month_index"), "Round": row.get("round"),
+            "Resource": row.get("resource"), "Award status": row.get("award_status"),
+            "Winner": row.get("winner") if row.get("award_status") == "confirmed" else "Not confirmed",
+        } for row in snapshot.rounds], use_container_width=True)
+    else:
+        st.info(f"Contract Net outcomes {snapshot.rounds_status}: no persisted round result is available.")
+
+    st.markdown("#### Hotspot screening")
+    st.caption("Project-defined provisional screening only; this is not validated epidemiological evidence. Unknown/unavailable is not inactive.")
+    if snapshot.hotspots:
+        st.dataframe([{
+            "month_index": row.get("month_index"), "Division": row.get("ds_division"),
+            "Status": row.get("status", "Unavailable"), "Rule": row.get("rule_id"),
+            "Reason": row.get("reason"),
+        } for row in snapshot.hotspots], use_container_width=True)
+    else:
+        st.info(f"Hotspot outputs {snapshot.hotspots_status}; no screening result is available.")
+
+    st.markdown("#### Alert decisions and transport")
+    st.caption("Confirmed means received by the run-local simulated inbox only, not an external health officer.")
+    if snapshot.alerts:
+        st.dataframe([{
+            "month_index": row.get("month_index"), "Division": row.get("ds_division"),
+            "Tier": row.get("tier", "Unavailable"), "Hotspot": row.get("hotspot_status", "Unavailable"),
+            "Decision": row.get("status", "Unavailable"),
+            "Transport": row.get("delivery_status", "Unavailable"),
+            "Reason": row.get("reason", row.get("delivery_reason", "")),
+        } for row in snapshot.alerts], use_container_width=True)
+    else:
+        st.info(f"Alert outcomes {snapshot.alerts_status}; no decision record is available.")
+    if snapshot.errors:
+        with st.expander("Incomplete monitor data"):
+            for error in snapshot.errors:
+                st.warning(error)
+
+
+def _render_agent_monitor(st: Any, run_dir: Path) -> None:
+    snapshot = load_agent_monitor(run_dir)
+    _render_agent_monitor_snapshot(st, snapshot)
+
+
 def main() -> None:
     try:
         import streamlit as st
@@ -653,9 +758,30 @@ def main() -> None:
     st.warning(DISCLAIMER)
     data_root = Path(os.environ.get("CKDU_DATA_ROOT", ROOT / "data"))
     demo_output = os.environ.get("CKDU_DEMO_OUTPUT_DIR")
-    views = ("Team outputs", "Illustrative demo fixtures") + (("Generated local demo",) if demo_output else ())
+    simulation_run = os.environ.get("CKDU_SIMULATION_RUN_DIR")
+    views = ("Team outputs", "Illustrative demo fixtures") + (("Generated local demo",) if demo_output else ()) + ("Agent Monitor",)
     default_view = views.index("Generated local demo") if demo_output else 0
     view = st.radio("Data view", views, index=default_view, horizontal=True)
+    if view == "Agent Monitor":
+        if not simulation_run:
+            st.subheader("Live Agent Monitor")
+            st.info("No simulation run selected. Set CKDU_SIMULATION_RUN_DIR to one isolated src.sim.runner output directory containing run_manifest.json, agent_events.jsonl, and logs/messages.csv.")
+            return
+        monitor_dir = Path(simulation_run).expanduser()
+        st.caption("This source is separate from team outputs, illustrative fixtures, and CKDU_DEMO_OUTPUT_DIR generated local-demo artifacts.")
+        if hasattr(st, "fragment"):
+            @st.fragment(run_every=2)
+            def refresh_monitor():
+                _render_agent_monitor(st, monitor_dir)
+            refresh_monitor()
+        else:
+            if st.button("Refresh Agent Monitor"):
+                st.rerun()
+            _render_agent_monitor(st, monitor_dir)
+        with st.expander("Scientific limitations"):
+            st.caption("Water-quality/risk indicators do not diagnose CKDu or establish that water caused CKDu.")
+            st.caption("The WQI uses the project's reduced parameter set; hotspot screening is provisional.")
+        return
     if view == "Generated local demo":
         _render_local_demo(st, Path(demo_output))
         with st.expander("Scientific limitations"):

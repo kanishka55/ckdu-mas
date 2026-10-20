@@ -23,6 +23,9 @@ non-empty target. Outputs include:
 
 - `run_manifest.json`: provenance, configuration, agent lifecycle events, month completion, round
   paths, message row counts, stage statuses, failures, and evidence-gated evaluator statuses.
+- `agent_events.jsonl`: append-only runner lifecycle, month/round/hotspot/alert events plus a
+  two-second runner heartbeat. It is separate from, and does not change, the seven-column message
+  CSV. Heartbeats establish runner-process freshness, not per-behaviour health.
 - `logs/messages.csv`: the shared seven-column typed directional message log, isolated to this run.
 - `logs/risk_scores.csv` and `logs/well_scores.csv`: outputs from the existing risk output writer.
 - `logs/evaluation_summary.csv`: existing evaluator output. Missing references, baselines, and event
@@ -44,10 +47,21 @@ they do not alter the logger's seven columns. Duplicate, gapped, out-of-order, m
 or Unknown evidence remains unavailable. The configurable rule is project-defined screening, not a
 validated medical or epidemiological model.
 
-This runner implements local SPADE alert transport to its simulated inbox, but not a deployed
-health-officer endpoint, multi-round Contract Net convergence, or an Agent Monitor. Alert tiers
+This runner implements local SPADE alert transport to its simulated inbox and persists events for
+the dashboard Agent Monitor, but not a deployed health-officer endpoint or multi-round Contract Net
+convergence. Alert tiers
 without an approved policy remain unavailable. WQI uses the project's reduced parameter set and is
 not diagnostic or causal evidence about CKDu.
+
+`dashboard/app.py` exposes an **Agent Monitor** source when selected. Set
+`CKDU_SIMULATION_RUN_DIR` to one isolated output directory from this runner. It reads that run's
+event journal, final manifest, message log, round files, hotspot results, and alert outcomes; it does
+not infer a run from `logs/`, fixture files, or `CKDU_DEMO_OUTPUT_DIR`. While the manifest is running,
+freshness is based on recent journal/message evidence and the dashboard fragment refreshes every two
+seconds. Once `run_finished` is recorded, the same view is a persisted snapshot. A started lifecycle
+event plus fresh runner activity indicates a started agent process; it does not prove each behaviour
+is healthy or that an external XMPP service is reachable. Missing or stale evidence is shown as
+unknown/stale.
 
 Example: two simulated months, with explicit calendar labels and a fresh output path:
 

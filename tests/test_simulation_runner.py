@@ -11,6 +11,7 @@ from pathlib import Path
 from src.agents.clock import ClockAgent
 from src.core import msg_log, ontology
 from src.sim.runner import SimulationConfig, run_simulation, validate_output_dir
+from src.sim.agent_monitor import load_agent_monitor
 
 
 class SimulationRunnerConfigurationTests(unittest.TestCase):
@@ -79,10 +80,12 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertEqual(result["stage_status"]["hotspot_agent"], "processed_risk_records")
             self.assertEqual(result["stage_status"]["alert_transport"],
                              "local_simulated_inbox_not_real_health_officer")
-            self.assertEqual(result["stage_status"]["agent_monitor"], "not_implemented")
+            self.assertEqual(result["stage_status"]["agent_monitor"],
+                             "event_journal_and_message_log_available")
             self.assertTrue((output / "logs/messages.csv").is_file())
             self.assertTrue((output / "logs/risk_scores.csv").is_file())
             self.assertTrue((output / "logs/evaluation_summary.csv").is_file())
+            self.assertTrue((output / "agent_events.jsonl").is_file())
             self.assertEqual(len(list((output / "rounds").glob("*.json"))), 2)
             persisted_risks = json.loads((output / "risk_records.json").read_text(encoding="utf-8"))
             self.assertEqual(len(persisted_risks), len(result["divisions"]) * 2)
@@ -138,6 +141,18 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertNotIn("password", manifest["configuration"])
             self.assertTrue(all(event["event"] in {"started", "stopped"}
                                 for event in manifest["agent_lifecycle"]))
+            monitor = load_agent_monitor(output)
+            self.assertEqual(monitor.freshness, "completed snapshot")
+            self.assertTrue(monitor.agents)
+            self.assertTrue(all(agent["Status"] == "completed" for agent in monitor.agents),
+                            {"agents": monitor.agents,
+                             "coordinator_events": [event for event in monitor.lifecycle_events
+                                                    if "Coordinator" in str(event.get("component"))]})
+            self.assertEqual(len(monitor.months), 2)
+            self.assertTrue(monitor.message_counts)
+            self.assertTrue(monitor.hotspots)
+            self.assertTrue(monitor.alerts)
+            self.assertEqual(len(monitor.rounds), 2)
 
 
 if __name__ == "__main__":
