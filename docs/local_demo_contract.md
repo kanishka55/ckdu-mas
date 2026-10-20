@@ -48,10 +48,12 @@ The proposed runner should use this sequence, with path arguments injected into 
    class data from `data/raw/ckdu_02_wqi_method_and_thresholds.csv`.
 2. Expand the existing two seasonal readings into the project's documented month sequence with
    `src/core/wells.py`; the seasonal readings are repeated, not interpolated.
-3. The runner reuses `src/sim/load_data.py`, `src/core/wqi.py`, `src/core/risk_tiers.py`, and
-   `src/sim/risk_outputs.write_outputs(...)` using demo paths. It does not instantiate SPADE agents.
-   If pandas or the method/input is unavailable, risk and well score files have headers only and the
-   manifest records the scoring stage as unavailable.
+3. The standalone `src/sim/run_local_demo.py` runner reuses `src/sim/load_data.py`,
+   `src/core/wqi.py`, `src/core/risk_tiers.py`, and `src/sim/risk_outputs.write_outputs(...)` using
+   demo paths; it does not instantiate SPADE agents. The separate multi-agent `src/sim/runner.py`
+   starts the production-style SPADE agents, including `HotspotAgent`, using its own fresh output
+   root. If pandas or the method/input is unavailable in the standalone demo, risk and well score
+   files have headers only and the manifest records the scoring stage as unavailable.
 4. Pass risk output and the explicit hotspot result to `AlertAgent.process_risk_record()`. Its
    existing input seam requires a boolean hotspot value; `None` means unavailable and must prevent
    a sent alert. Current alert wording supports `Excellent`, `Good`, and `Poor`; `Very Poor` and
@@ -68,12 +70,20 @@ The proposed runner should use this sequence, with path arguments injected into 
 
 ### Hotspot screening
 
-There is no `src/agents/hotspot.py` or approved hotspot rule. Member B's existing risk records contain
-`month_index`, `ds_division`, `wqi`, `tier`, and `drivers`; `well_risk` also carries individual
-illustrative well scores and the published `ckdu_prevalence_class` label. Neither schema defines a
-hotspot classification. Members B and the project owner must approve the rule's inputs, decision
-logic, and handling of incomplete evidence. Any first demo rule must be called a project-defined
-screening rule, not a validated medical or epidemiological model.
+`src/agents/hotspot.py` now subscribes to the scorer's existing typed `risk_record` fan-out and
+reuses `src/core/hotspot_screening.py`. It stores history by division and simulated month, rejects
+duplicates and out-of-order records, and uses the helper's explicit unavailable states for gaps,
+Unknown values, and insufficient history. Its run-local output is structured screening data, not an
+ontology message: the shared ontology has no hotspot-result type, and `well_risk` is an input detail
+message. This is a project-defined screening rule, not a validated medical or epidemiological
+model. Member B and the project owner still need to review the rule's inputs, decision logic, output
+semantics, and handling of incomplete evidence before treating it as a team policy.
+
+If downstream agents later require a transported result, the smallest proposed ontology addition is
+an `inform` message of type `hotspot_result` with `month_index:int`, `ds_division:str`,
+`status:str` (`active` | `inactive` | `unavailable`), `rule_id:str|null`,
+`evidence_month_indexes:list[int]`, and `reason:str|null`. This proposal is not implemented or
+approved; the current agent persists its `ScreeningResult` data only in the isolated run artifact.
 
 ### Contract Net and baselines
 

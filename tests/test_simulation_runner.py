@@ -76,7 +76,7 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertEqual([month["month_index"] for month in result["month_status"]], [0, 1])
             self.assertTrue(all(month["risk_delivery"] == "complete" for month in result["month_status"]))
             self.assertTrue(all(month["contract_net"] != "pending" for month in result["month_status"]))
-            self.assertEqual(result["stage_status"]["hotspot_agent"], "missing_not_implemented")
+            self.assertEqual(result["stage_status"]["hotspot_agent"], "processed_risk_records")
             self.assertEqual(result["stage_status"]["alert_transport"], "missing_not_implemented")
             self.assertEqual(result["stage_status"]["agent_monitor"], "not_implemented")
             self.assertTrue((output / "logs/messages.csv").is_file())
@@ -85,6 +85,13 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertEqual(len(list((output / "rounds").glob("*.json"))), 2)
             persisted_risks = json.loads((output / "risk_records.json").read_text(encoding="utf-8"))
             self.assertEqual(len(persisted_risks), len(result["divisions"]) * 2)
+            hotspot_results = json.loads(
+                (output / "hotspot_screening.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(hotspot_results), len(result["divisions"]) * 2)
+            self.assertTrue(all(row["component"] == "SPADE HotspotAgent"
+                                and row["risk_record_received"] for row in hotspot_results))
+            self.assertTrue(all(row["status"] == "unavailable" for row in hotspot_results))
             self.assertGreater(result["message_counts"]["logged_rows_including_sent_received_copies"], 0)
             alert_decisions = json.loads(
                 (output / "alert_decisions.json").read_text(encoding="utf-8")
