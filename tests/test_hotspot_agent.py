@@ -61,6 +61,14 @@ class HotspotAgentUnitTests(unittest.TestCase):
         self.assertIn("out_of_order", result.reason)
         self.assertEqual(len(self.agent.risk_history["Demo Division"]), 1)
 
+    def test_conflicting_correlation_thread_for_same_division_month_is_unavailable(self):
+        first = self.agent.process_risk_record(risk_record(0), "readings-0")
+        conflict = self.agent.process_risk_record(risk_record(0), "other-thread")
+        self.assertEqual(first.status, "unavailable")
+        self.assertEqual(conflict.status, "unavailable")
+        self.assertEqual(conflict.reason, "conflicting_risk_correlation_threads")
+        self.assertIsNone(conflict.alert_hotspot)
+
     def test_unknown_wqi_is_unavailable_and_not_inactive(self):
         self.agent.process_risk_record(risk_record(0))
         result = self.agent.process_risk_record(risk_record(1, tier="Unknown", wqi=None))

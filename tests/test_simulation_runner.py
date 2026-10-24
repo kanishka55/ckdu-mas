@@ -10,6 +10,7 @@ from pathlib import Path
 
 from src.agents.clock import ClockAgent
 from src.core import msg_log, ontology
+from src.core.hotspot_screening import ScreeningRule
 from src.sim.runner import SimulationConfig, run_simulation, validate_output_dir
 from src.sim.agent_monitor import load_agent_monitor
 
@@ -64,6 +65,13 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
                 confirmation_timeout_s=2.0,
                 stage_timeout_s=30.0,
                 run_id="test-run",
+                # Explicitly configured project-defined screening parameters for this
+                # illustrative integration run; they are not scientific thresholds.
+                hotspot_rule=ScreeningRule(
+                    "illustrative-persistent-risk-tier-v1",
+                    frozenset({"Poor", "Very Poor", "Unsuitable"}),
+                    2,
+                ),
             )
             result_holder = {}
 
@@ -95,16 +103,48 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertEqual(len(hotspot_results), len(result["divisions"]) * 2)
             self.assertTrue(all(row["component"] == "SPADE HotspotAgent"
                                 and row["risk_record_received"] for row in hotspot_results))
-            self.assertTrue(all(row["status"] == "unavailable" for row in hotspot_results))
+            available_screens = [row for row in hotspot_results
+                                 if row["status"] in {"active", "inactive"}]
+            self.assertTrue(available_screens, "configured rule should screen complete two-month histories")
+            self.assertTrue(all(row["rule_id"] == "illustrative-persistent-risk-tier-v1"
+                                for row in available_screens))
+            self.assertTrue(all(row["evidence_month_indexes"] == [0, 1]
+                                for row in available_screens))
+            self.assertTrue(all(row["provenance"] == "project_defined_screening_not_validated_model"
+                                for row in hotspot_results))
+            month_zero_screens = [row for row in hotspot_results if row["month_index"] == 0]
+            month_one_screens = [row for row in hotspot_results if row["month_index"] == 1]
+            self.assertTrue(all(row["status"] == "unavailable"
+                                and row["reason"] == "insufficient_consecutive_month_history"
+                                for row in month_zero_screens))
+            self.assertEqual(len(month_one_screens), len(result["divisions"]))
+            self.assertTrue(all(row["status"] in {"active", "inactive"}
+                                for row in month_one_screens))
             self.assertGreater(result["message_counts"]["logged_rows_including_sent_received_copies"], 0)
             alert_decisions = json.loads(
                 (output / "alert_decisions.json").read_text(encoding="utf-8")
             )
             self.assertTrue(alert_decisions)
-            self.assertTrue(all(item["status"] == "unavailable" and item["hotspot"] is None
+            self.assertTrue(any(item["status"] in {"emitted", "suppressed"}
                                 for item in alert_decisions))
-            self.assertTrue(all(item["delivery_status"] == "not_requested"
+            self.assertTrue(all(
+                item["status"] == "unavailable" or item["hotspot"] in {True, False}
+                for item in alert_decisions
+            ))
+            self.assertTrue(all(item["provenance"] == "synthetic_spade_simulation_local_inbox"
                                 for item in alert_decisions))
+            self.assertTrue(all(item["delivery_status"] in {
+                "not_requested", "sent", "confirmed", "failed"
+            } for item in alert_decisions))
+            month_zero_alerts = [item for item in alert_decisions if item["month_index"] == 0]
+            month_one_alerts = [item for item in alert_decisions if item["month_index"] == 1]
+            self.assertTrue(all(item["status"] == "unavailable"
+                                and item["reason"] == "hotspot_status_unavailable"
+                                and item["delivery_status"] == "not_requested"
+                                for item in month_zero_alerts))
+            self.assertTrue(any(item["status"] == "emitted"
+                                and item["delivery_status"] == "confirmed"
+                                for item in month_one_alerts))
             for index in (0, 1):
                 round_result = json.loads(
                     (output / "rounds" / f"month_index_{index:04d}_round_1.json")
@@ -126,10 +166,10 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             risk_bodies = [body for body in decoded if body["type"] == "risk_record"]
             self.assertTrue(risk_bodies)
             self.assertTrue(all(body["month_index"] in {0, 1} for body in risk_bodies))
-            self.assertFalse(any(row["performative"] == ontology.INFORM
-                                 and row["direction"] == "sent"
-                                 and json.loads(row["payload"]).get("type") == "alert"
-                                 for row in rows))
+            self.assertTrue(any(row["performative"] == ontology.INFORM
+                                and row["direction"] == "sent"
+                                and json.loads(row["payload"]).get("type") == "alert"
+                                for row in rows))
             self.assertTrue(any(row["performative"] == ontology.INFORM
                                 and row["direction"] == "sent"
                                 and json.loads(row["payload"]).get("type") == "hotspot_result"
@@ -153,6 +193,10 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertTrue(monitor.hotspots)
             self.assertTrue(monitor.alerts)
             self.assertEqual(len(monitor.rounds), 2)
+            self.assertTrue(any(row.get("status") in {"active", "inactive"}
+                                for row in monitor.hotspots))
+            self.assertTrue(any(row.get("status") in {"emitted", "suppressed"}
+                                for row in monitor.alerts))
 
 
 if __name__ == "__main__":

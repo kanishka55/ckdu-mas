@@ -89,6 +89,18 @@ class HotspotScreeningTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ScreeningRule("bad-rule", frozenset({"Unknown"}), 1)
 
+    def test_invalid_rule_configuration_is_rejected(self):
+        invalid = (
+            ("", frozenset({"Poor"}), 1),
+            ("empty-tiers", frozenset(), 1),
+            ("zero-window", frozenset({"Poor"}), 0),
+            ("unknown-tier", frozenset({"Unknown"}), 1),
+        )
+        for rule_id, tiers, months in invalid:
+            with self.subTest(rule_id=rule_id, tiers=tiers, months=months):
+                with self.assertRaises(ValueError):
+                    ScreeningRule(rule_id, tiers, months)
+
     def test_other_divisions_do_not_supply_target_evidence(self):
         result = screen_risk_history(
             [risk_record(0, ds_division="Other"), risk_record(1)],

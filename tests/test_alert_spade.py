@@ -83,6 +83,25 @@ class AlertProcessingAgentUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.agent.records[0]["status"], "unavailable")
         self.assertIn("unmatched_or_missing", self.agent.records[0]["reason"])
 
+    async def test_missing_thread_and_mismatched_month_do_not_pair(self):
+        await self.agent.accept_evidence(risk(), None)
+        await self.agent.accept_evidence(hotspot(), "readings-0")
+        self.assertEqual(self.agent.records[0]["reason"], "missing_correlation_thread")
+        self.agent.finalize_month(0)
+        self.assertEqual(self.agent.records[-1]["status"], "unavailable")
+
+        other = AlertProcessingAgent(
+            "alert@localhost", "unused", divisions=["Demo"], recipient_jid="inbox@localhost",
+            risk_sender_jid="risk@localhost", hotspot_sender_jid="hotspot@localhost",
+            output_path=Path(self.temp.name) / "mismatched-month.json",
+        )
+        await other.accept_evidence(risk(month=0), "readings-0")
+        await other.accept_evidence(hotspot(month=1, division="Demo"), "readings-0")
+        other.finalize_month(0)
+        self.assertEqual(other.records[0]["status"], "unavailable")
+        self.assertEqual(other.records[0]["reason"], "risk_hotspot_evidence_unmatched_or_missing")
+        self.assertEqual(self.sent, [])
+
     async def test_ack_requires_expected_sender_thread_and_body(self):
         await self.agent.accept_evidence(risk(), "readings-0")
         await self.agent.accept_evidence(hotspot(), "readings-0")
@@ -185,8 +204,6 @@ class EmbeddedAlertFlowTests(unittest.TestCase):
                             raise TimeoutError("alert did not reach and receive acknowledgement from local inbox")
                         await asyncio.sleep(0.02)
                     hotspot_agent.finalize_month(0)
-                    hotspot_agent.write_output()
-                    processor.write_output()
                 finally:
                     for agent in reversed(started):
                         await agent.stop()
@@ -199,5 +216,9 @@ class EmbeddedAlertFlowTests(unittest.TestCase):
             self.assertEqual(processor.records[0]["delivery_events"],
                              [{"state": "requested"}, {"state": "sent"},
                               {"state": "confirmed", "recipient": "inbox@localhost"}])
+            # Persist after spade.run returns so container teardown cannot interrupt
+            # synchronous output writes at the end of the embedded event loop.
+            hotspot_agent.write_output()
+            processor.write_output()
             self.assertTrue((Path(temp) / "alerts.json").is_file())
             self.assertTrue((Path(temp) / "hotspots.json").is_file())
