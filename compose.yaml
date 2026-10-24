@@ -42,9 +42,11 @@ services:
     environment:
       CKDU_DEMO_OUTPUT_DIR: /app/demo_output
       CKDU_SIMULATION_RUN_DIR: /app/simulation_run
+      CKDU_SIMULATION_LAB_DIR: /app/simulation_lab
     volumes:
       - "${CKDU_DEMO_HOST_DIR:-./demo_output}:/app/demo_output"
       - "${CKDU_SIMULATION_RUN_HOST_DIR:-/private/tmp/ckdu-mas-simulation-run}:/app/simulation_run:ro"
+      - "${CKDU_SIMULATION_LAB_HOST_DIR:-/tmp/ckdu-mas-simulation-lab}:/app/simulation_lab"
     ports:
       - "8501:8501"
     init: true

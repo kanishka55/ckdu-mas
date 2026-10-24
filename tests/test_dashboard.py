@@ -26,6 +26,9 @@ from dashboard.app import (
     _render_live_coordination,
     _render_live_coordination_snapshot,
     _coordination_event_source,
+    _live_coordination_run_options,
+    _selected_run_id,
+    _lab_run_history_rows,
 )
 
 
@@ -129,6 +132,57 @@ class TestDashboardData(unittest.TestCase):
         self.assertTrue(any(rows and "Event" in rows[0] for rows in tables))
         self.assertTrue(any(rows and set(rows[0]) == set(msg_log.COLUMNS) for rows in tables))
 
+    def test_live_coordination_renders_persisted_evaluation_and_gates_allocations(self) -> None:
+        class Box:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def metric(self, *_args, **_kwargs):
+                pass
+
+        class Recorder:
+            def __init__(self):
+                self.tables = []
+
+            def __getattr__(self, _name):
+                return lambda *_args, **_kwargs: None
+
+            def dataframe(self, rows, **_kwargs):
+                self.tables.append(rows)
+
+            def columns(self, count):
+                return [Box() for _ in range(count)]
+
+            def expander(self, _label):
+                return Box()
+
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            logs = run_dir / "logs"
+            logs.mkdir()
+            self._write_csv(logs / "evaluation_summary.csv",
+                            ["metric", "scope", "value", "unit", "status", "observations", "details"],
+                            [["allocation_efficiency", "all", "0.75", "ratio", "ok", "3", "{}"],
+                             ["risk_classification_alignment", "all", "", "ratio", "unavailable", "0",
+                              '{"reason":"reference mapping missing"}']])
+            (run_dir / "run_manifest.json").write_text(
+                json.dumps({"run_id": "evaluation-display-fixture", "status": "completed"}),
+                encoding="utf-8",
+            )
+            snapshot = load_agent_monitor(run_dir)
+            st = Recorder()
+            _render_live_coordination_snapshot(st, snapshot)
+            evaluation_rows = next(table for table in st.tables
+                                   if table and table[0].get("Metric") == "allocation_efficiency")
+            self.assertEqual(evaluation_rows[0]["Value"], "Unavailable")
+            self.assertEqual(evaluation_rows[0]["Status"], "unavailable")
+            self.assertIn("not verified", evaluation_rows[0]["Details"])
+            self.assertEqual(evaluation_rows[1]["Value"], "Unavailable")
+            self.assertEqual(evaluation_rows[1]["Status"], "unavailable")
+
     def test_live_coordination_model_marks_completed_run_as_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -189,6 +243,52 @@ class TestDashboardData(unittest.TestCase):
         _render_live_coordination(st, None)
         self.assertEqual(st.calls[0], ("subheader", "Live Agent Coordination"))
         self.assertIn("No simulation run is configured", st.calls[1][1])
+
+    def test_live_coordination_run_selector_includes_lab_run_and_configured_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "lab"
+            run_dir = root / "runs" / "lab-run"
+            control = root / "control" / "lab-run.json"
+            control.parent.mkdir(parents=True)
+            control.write_text(json.dumps({
+                "run_id": "lab-run", "status": "completed", "run_dir": str(run_dir),
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }), encoding="utf-8")
+            configured = Path(temp) / "configured-run"
+            options = _live_coordination_run_options(str(configured), root)
+        self.assertEqual(len(options), 2)
+        self.assertIn("Configured run", options[0][0])
+        self.assertTrue(any("Simulation Lab · lab-run · completed" == label and path == run_dir
+                            for label, path in options))
+
+    def test_simulation_lab_history_selection_and_status_summary(self) -> None:
+        class Selection:
+            class Result:
+                rows = [0]
+            selection = Result()
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "lab"
+            run_dir = root / "runs" / "history-run"
+            run_dir.mkdir(parents=True)
+            (root / "control").mkdir()
+            (run_dir / "run_manifest.json").write_text(json.dumps({
+                "run_id": "history-run", "status": "completed_with_unavailable_stages",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "configuration": {"start_month_index": 3, "end_month_index": 4,
+                                  "resource": "RO_unit", "resource_pool": 2},
+                "provenance": {"classification": "synthetic_simulation"},
+            }), encoding="utf-8")
+            (root / "control/history-run.json").write_text(json.dumps({
+                "run_id": "history-run", "status": "completed_with_unavailable_stages",
+                "run_dir": str(run_dir), "created_at": "2026-01-01T00:00:00+00:00",
+                "input_source": "built-in sample", "input_record_count": 5,
+            }), encoding="utf-8")
+            rows = _lab_run_history_rows(root)
+        self.assertEqual(_selected_run_id(Selection(), rows), "history-run")
+        self.assertEqual(rows[0]["Status"], "completed with unavailable stages")
+        self.assertEqual(rows[0]["month_index range"], "3–4")
+        self.assertEqual(rows[0]["Input records"], 5)
 
     def test_demo_risk_index_and_allocation_month_stay_separate(self) -> None:
         data = load_dashboard_data()

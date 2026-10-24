@@ -16,6 +16,61 @@ calendar mapping is supplied explicitly using one calendar label per simulated `
 Neither is derived from the other by the runner. The source seasonal values are expanded using the
 existing `wells.expand_to_months` behavior; repeated seasonal rows are not new monthly measurements.
 
+## UI Simulation Lab
+
+The dashboard's **Simulation Lab** page uses the same `src.sim.runner` SPADE runner. Select the
+built-in `data/processed/synthetic_wells.csv` sample or upload a CSV with exactly the existing
+seasonal input columns from `src.core.wells.READING_COLUMNS` with `month` omitted:
+`well_id,ds_division,district,ckdu_prevalence_class,season,source,pH,EC_uS_cm,alkalinity_mg_L,hardness_mg_L,F_mg_L,DOC_mg_L,Cl_mg_L,SO4_mg_L,Fe_ug_L`.
+The page previews the file and validates it with `src.sim.load_data.load_monthly_readings` before
+launch. The existing runner requires every source label to be `synthetic`; real or mixed-source
+uploads are rejected. A selected upload is copied unchanged into the isolated lab input directory
+and its exact path is passed to the runner.
+
+Configure `month_index` range, the explicit first calendar month label, resource, integer pool,
+and timeouts in the page. The subsequent calendar labels are passed explicitly as the normal
+12-month calendar sequence; the UI does not equate a simulated index with a calendar month. The
+optional hotspot controls are user-supplied provisional screening settings; leaving them disabled
+does not substitute a default rule. Starting a run launches the existing runner in a background
+process. Only one queued/running lab simulation is allowed at a time, each run gets a new directory,
+and the runner still enforces its fresh-output protections. The page displays run status and bounded
+process-log details for failures.
+
+Compose sets `CKDU_SIMULATION_LAB_DIR=/app/simulation_lab` and mounts the configurable host
+`CKDU_SIMULATION_LAB_HOST_DIR` there for persistent uploads, control records, process logs, and run
+directories. The **Live Coordination** page lists those lab runs as well as the separately configured
+`CKDU_SIMULATION_RUN_DIR` run. Select the lab run to refresh its persisted event journal, agent
+heartbeats/status, seven-column messages, round results, hotspot and alert artifacts. The UI shows
+runner observations separately from recorded agent behavior and logged SPADE messages. A heartbeat
+is liveness evidence only, and the local alert acknowledgement is not delivery to a real health
+officer. Allocation/evaluation metrics lacking provenance or required inputs remain unavailable.
+
+The Simulation Lab run-history table is row-selectable. Selecting the run launched by the page opens
+its live execution view immediately. The view shows run progress, one compact card per observed or
+configured agent identity, latest recorded activity/input/result, and a collaboration graph. Solid
+graph arrows come from sent rows in the seven-column SPADE message log; dashed arrows represent
+runner/input orchestration and are not messages. The current runner fans risk evidence to village,
+collector, hotspot, and alert agents, waits for risk/hotspot/alert stages, then starts Contract Net.
+The order reflects the runner implementation, rather than an assumed linear agent chain.
+
+Active selected runs refresh every two seconds; completed and failed runs are snapshots. The result
+summary shows risk by division, selected versus confirmed awards, hotspot evidence month history,
+and alert delivery/acknowledgement state. Alert acknowledgements mean receipt by the simulated inbox
+only. Missing outputs and unavailable evaluation metrics remain unavailable. Expand **Technical
+details** for the filtered timeline, full seven-column message rows and payloads, month artifacts,
+round details, and evaluator summary. Sent/received rows remain distinct because the logger has no
+unique message ID; the UI does not merge rows based on payload similarity.
+
+Optional technical per-agent sections summarize only recorded identities and events. A missing
+startup, heartbeat, phase, work outcome, or message remains unknown/unavailable. Runner stage
+summaries are labeled separately from agent events and SPADE messages. Month and Contract Net
+inspectors use round artifacts and typed messages when present; selected awardees remain distinct
+from confirmed awardees. The displayed ranking policy follows the current implementation: bids are
+normalized by the maximum, ranked highest first, and ties are alphabetical by division name.
+Evaluation metrics are read from the run's
+`logs/evaluation_summary.csv`; allocation comparisons stay unavailable unless required provenance,
+baselines, population/risk inputs, and an approved risk-weight definition are available.
+
 ## Isolated outputs
 
 The caller must provide a new or empty output directory. The runner refuses production `logs/`,

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import ast
 import csv
+import html
 import json
 import math
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -25,6 +27,28 @@ from src.sim.evaluate import (
     read_allocation_rows,
 )
 from src.sim.agent_monitor import AgentMonitorSnapshot, load_agent_monitor
+from src.sim.simulation_lab import (
+    SAMPLE_INPUT,
+    SimulationSettings,
+    default_lab_root,
+    get_run_status,
+    launch_simulation,
+    list_lab_runs,
+    read_process_log_tail,
+    validate_input_bytes,
+    validate_input_path,
+)
+from src.sim.run_details import (
+    SimulationRunDetails,
+    agent_execution_details,
+    build_execution_view,
+    combined_timeline,
+    filter_evidence,
+    filter_messages,
+    load_simulation_run_details,
+)
+from src.core.ontology import RESOURCES
+from src.core.hotspot_screening import KNOWN_TIERS
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -736,6 +760,17 @@ def _render_agent_monitor_snapshot(st: Any, snapshot: AgentMonitorSnapshot) -> N
         } for row in snapshot.alerts], use_container_width=True)
     else:
         st.info(f"Alert outcomes {snapshot.alerts_status}; no decision record is available.")
+
+    evaluation = _read_csv(
+        snapshot.run_dir / "logs" / "evaluation_summary.csv",
+        EVALUATION_COLUMNS,
+        "Persisted evaluator summary for this selected SPADE run",
+    )
+    _render_evaluation_summary(
+        st, evaluation, allocation_results_verified=False,
+        context=("Allocation comparisons remain unavailable unless provenance, required inputs, "
+                 "baselines, and the risk-weight definition are verified."),
+    )
     if snapshot.errors:
         with st.expander("Incomplete monitor data"):
             for error in snapshot.errors:
@@ -745,6 +780,575 @@ def _render_agent_monitor_snapshot(st: Any, snapshot: AgentMonitorSnapshot) -> N
 def _render_agent_monitor(st: Any, run_dir: Path) -> None:
     snapshot = load_agent_monitor(run_dir)
     _render_agent_monitor_snapshot(st, snapshot)
+
+
+def _lab_run_history_rows(lab_root: Path) -> tuple[dict[str, Any], ...]:
+    """Create a compact history table from lab control records and each run's manifest."""
+    output = []
+    for control in list_lab_runs(lab_root):
+        run_dir = Path(control["run_dir"]).expanduser().resolve()
+        try:
+            run_dir.relative_to((lab_root.expanduser().resolve() / "runs").resolve())
+        except ValueError:
+            continue
+        manifest: Mapping[str, Any] = {}
+        try:
+            parsed = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                manifest = parsed
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
+        config = manifest.get("configuration", {})
+        if not isinstance(config, Mapping):
+            config = {}
+        settings = control.get("settings", {})
+        if not isinstance(settings, Mapping):
+            settings = {}
+        start = config.get("start_month_index", settings.get("start_month_index"))
+        end = config.get("end_month_index", settings.get("end_month_index"))
+        month_range = f"{start}–{end}" if start is not None and end is not None else "Unavailable"
+        provenance = manifest.get("provenance", {})
+        provenance_label = (provenance.get("classification", "synthetic / provenance unavailable")
+                            if isinstance(provenance, Mapping) else "synthetic / provenance unavailable")
+        output.append({
+            "Run ID": control.get("run_id", "Unknown"),
+            "Status": _display_run_status(control.get("status", "unknown")),
+            "Started": manifest.get("started_at", control.get("created_at", "Unavailable")),
+            "Completed": manifest.get("completed_at", "Unavailable"),
+            "Input dataset / provenance": (
+                f"{control.get('input_source', 'Input unavailable')} · {provenance_label}"),
+            "Input records": control.get("input_record_count", manifest.get("input_record_count", "Unavailable")),
+            "month_index range": month_range,
+            "Resource": config.get("resource", settings.get("resource", "Unavailable")),
+            "Pool": config.get("resource_pool", settings.get("resource_pool", "Unavailable")),
+            "_run_dir": run_dir,
+            "_control_path": lab_root.expanduser().resolve() / "control" / f"{control.get('run_id')}.json",
+        })
+    return tuple(output)
+
+
+def _display_run_status(status: Any) -> str:
+    return {
+        "completed_with_unavailable_stages": "completed with unavailable stages",
+    }.get(str(status), str(status).replace("_", " "))
+
+
+def _selected_run_id(selection: Any, rows: Sequence[Mapping[str, Any]]) -> str | None:
+    """Extract the selected dataframe row across Streamlit's selection result wrappers."""
+    selected = getattr(getattr(selection, "selection", None), "rows", None)
+    if selected is None and isinstance(selection, Mapping):
+        selected = selection.get("selection", {}).get("rows", [])
+    if not selected:
+        return None
+    try:
+        index = int(selected[0])
+        return str(rows[index].get("Run ID")) if 0 <= index < len(rows) else None
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _artifact_display(rows: Sequence[Mapping[str, Any]], *, limit: int = 100) -> list[dict[str, Any]]:
+    """Convert JSON/CSV artifact records to Streamlit-safe display rows."""
+    return [dict(row) for row in rows[:limit]]
+
+
+def _render_page_table(st: Any, label: str, rows: Sequence[Mapping[str, Any]], *, key: str,
+                       page_size: int = 100) -> None:
+    total = len(rows)
+    if not total:
+        st.info(f"{label}: no matching records are available.")
+        return
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = 1
+    if pages > 1:
+        page = int(st.number_input(f"{label} page (of {pages})", min_value=1, max_value=pages,
+                                   value=1, step=1, key=f"{key}_page"))
+    start = (page - 1) * page_size
+    st.caption(f"Showing {start + 1}–{min(start + page_size, total)} of {total} records.")
+    st.dataframe(list(rows[start:start + page_size]), use_container_width=True, hide_index=True)
+
+
+def _format_run_duration(manifest: Mapping[str, Any]) -> str:
+    def parse(value: Any) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    started, ended = parse(manifest.get("started_at")), parse(manifest.get("completed_at"))
+    if started is None:
+        return "Unavailable until the start timestamp is recorded"
+    if ended is None:
+        if manifest.get("status") != "running":
+            return "Unavailable until a completion timestamp is recorded"
+        ended = datetime.now(timezone.utc)
+        running = True
+    else:
+        running = False
+    seconds = max(0.0, (ended - started).total_seconds())
+    return f"{seconds:.1f} seconds" + (" elapsed (running)" if running else "")
+
+
+def _pretty_event_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    fields = ("timestamp", "event_seq", "evidence_source", "component", "identity", "event_type",
+              "month_index", "month", "ds_division", "round", "thread_id", "phase", "stage",
+              "state", "outcome", "status", "screening_status", "award_status",
+              "decision_status", "delivery_status", "severity", "explanation",
+              "reason", "error", "behavior_failures", "performative", "direction",
+              "sender", "receiver", "resource")
+    return [{field: row.get(field, "Unavailable") for field in fields} for row in rows]
+
+
+def _render_agent_execution(st: Any, details: SimulationRunDetails) -> None:
+    st.subheader("Agent-by-agent execution")
+    st.caption("Lifecycle and work status come from recorded per-agent events. Runner-observed stage summaries are shown separately. A heartbeat is liveness evidence, not proof of correct behavior.")
+    agents = agent_execution_details(details)
+    if not agents:
+        st.info("No agent identities were observed in this run. No agent activity is inferred from class or configuration names.")
+        return
+    for agent in agents:
+        title = f"{agent['component']} · {agent['identity']} · {agent['status']}"
+        with st.expander(title):
+            st.write(agent["responsibility"])
+            st.caption(f"Status evidence: {agent['status_evidence']}")
+            st.dataframe([{
+                "First observed": agent["first_observed"] or "Unavailable",
+                "Last observed": agent["last_observed"] or "Unavailable",
+                "Latest heartbeat": agent["latest_heartbeat"],
+                "Heartbeat age (s)": agent["heartbeat_age_s"] if agent["heartbeat_age_s"] is not None else "Unavailable",
+                "Latest phase": agent["latest_phase"],
+                "Sent log rows": agent["sent_rows"], "Received log rows": agent["received_rows"],
+            }], use_container_width=True, hide_index=True)
+            phases = agent["phase_history"]
+            st.markdown("**Phase history**")
+            if phases:
+                st.dataframe(_pretty_event_rows(phases), use_container_width=True, hide_index=True)
+            else:
+                st.info("No explicit phase evidence is recorded for this identity.")
+            st.markdown("**Work, decisions, outputs, and failures**")
+            if agent["events"]:
+                st.dataframe(_pretty_event_rows(agent["events"]), use_container_width=True, hide_index=True)
+            else:
+                st.info("No agent event records are available.")
+            if agent["failures"]:
+                st.error("Failure evidence is present; inspect the event details above.")
+            st.markdown("**Messages involving this identity**")
+            if agent["messages"]:
+                st.dataframe([{
+                    "timestamp": row.get("timestamp"), "sender": row.get("sender"),
+                    "receiver": row.get("receiver"), "performative": row.get("performative"),
+                    "thread_id": row.get("thread_id"), "direction": row.get("direction"),
+                    "type": row.get("message_type"), "month_index": row.get("month_index"),
+                    "round": row.get("round"),
+                } for row in agent["messages"]], use_container_width=True, hide_index=True)
+            else:
+                st.info("No message-log rows involve this identity.")
+
+
+def _render_run_timeline(st: Any, details: SimulationRunDetails) -> None:
+    st.subheader("Chronological simulation timeline")
+    st.caption("Journal and message-log records are independent evidence sources. They are not merged or deduplicated; event severity is a display label derived from explicit event/performative names.")
+    rows = combined_timeline(details)
+    month_values = sorted({str(row.get("month_index")) for row in rows if row.get("month_index") is not None})
+    agent_values = sorted({str(value) for row in rows for value in
+                           (row.get("identity"), row.get("component"), row.get("sender"), row.get("receiver"))
+                           if value})
+    type_values = sorted({str(row.get("event_type", "unknown")) for row in rows})
+    c1, c2, c3, c4 = st.columns(4)
+    month = c1.selectbox("Timeline month_index", ("All", *month_values), key="run_detail_timeline_month")
+    agent = c2.selectbox("Timeline agent/component", ("All", *agent_values), key="run_detail_timeline_agent")
+    event_type = c3.selectbox("Timeline event type", ("All", *type_values), key="run_detail_timeline_type")
+    severity = c4.selectbox("Timeline severity", ("All", "info", "warning", "error"), key="run_detail_timeline_severity")
+    query = st.text_input("Search timeline evidence", key="run_detail_timeline_query")
+    filtered = filter_evidence(rows, month=month, agent=agent, event_type=event_type,
+                               severity=severity, query=query)
+    _render_page_table(st, "Timeline", _pretty_event_rows(filtered), key="run_detail_timeline")
+
+
+def _render_message_inspector(st: Any, details: SimulationRunDetails) -> None:
+    st.subheader("SPADE message inspector")
+    st.caption(f"Message log status: {details.message_status}. The logger has no stable per-message ID. Sent and received copies and repeated rows are preserved as recorded; no ambiguous rows are deduplicated.")
+    if not details.messages:
+        st.info("No valid seven-column SPADE message rows are available. Incomplete or missing logs are not reconstructed.")
+        return
+    months = sorted({str(row.get("month_index")) for row in details.messages if row.get("month_index") is not None})
+    senders = sorted({str(row.get("sender", "")) for row in details.messages})
+    receivers = sorted({str(row.get("receiver", "")) for row in details.messages})
+    performatives = sorted({str(row.get("performative", "")) for row in details.messages})
+    rounds = sorted({str(row.get("round")) for row in details.messages if row.get("round") is not None})
+    threads = sorted({str(row.get("thread_id", "")) for row in details.messages if row.get("thread_id")})
+    a, b, c, d = st.columns(4)
+    month = a.selectbox("Message month_index", ("All", *months), key="run_detail_message_month")
+    sender = b.selectbox("Sender", ("All", *senders), key="run_detail_message_sender")
+    receiver = c.selectbox("Recipient", ("All", *receivers), key="run_detail_message_receiver")
+    performative = d.selectbox("Performative", ("All", *performatives), key="run_detail_message_performative")
+    e, f = st.columns(2)
+    round_filter = e.selectbox("Message round", ("All", *rounds), key="run_detail_message_round")
+    thread_filter = f.selectbox("Message thread", ("All", *threads), key="run_detail_message_thread")
+    direction = st.selectbox("Direction", ("All", "sent", "received"), key="run_detail_message_direction")
+    query = st.text_input("Search message fields and payload", key="run_detail_message_query")
+    filtered = filter_messages(details.messages, query=query, month=month, sender=sender,
+                               receiver=receiver, performative=performative, direction=direction)
+    filtered = tuple(row for row in filtered
+                     if (round_filter == "All" or str(row.get("round")) == round_filter)
+                     and (thread_filter == "All" or row.get("thread_id") == thread_filter))
+    display = [{
+        "timestamp": row.get("timestamp"), "sender": row.get("sender"),
+        "receiver": row.get("receiver"), "performative": row.get("performative"),
+        "thread_id": row.get("thread_id"), "message_type": row.get("message_type"),
+        "month_index": row.get("month_index"), "round": row.get("round"),
+        "direction": row.get("direction"), "payload_status": row.get("payload_status"),
+    } for row in filtered]
+    _render_page_table(st, "Messages", display, key="run_detail_messages")
+    if not filtered:
+        return
+    index = st.selectbox("Open recorded message", range(len(filtered)),
+                         format_func=lambda i: (f"{filtered[i].get('timestamp')} · "
+                                                f"{filtered[i].get('sender')} → {filtered[i].get('receiver')} · "
+                                                f"{filtered[i].get('performative')} · {filtered[i].get('thread_id')}"),
+                         key="run_detail_selected_message")
+    chosen = filtered[int(index)]
+    st.markdown("**Full recorded payload**")
+    st.code(str(chosen.get("payload", "")), language="json")
+    if chosen.get("decoded_payload") is not None:
+        st.json(chosen["decoded_payload"])
+    else:
+        st.warning(f"Payload could not be decoded: {chosen.get('payload_status')}")
+    thread = chosen.get("thread_id")
+    if thread:
+        related = [row for row in details.events if row.get("thread_id") == thread]
+        related.extend(row for row in details.messages if row.get("thread_id") == thread)
+        st.markdown(f"**Recorded evidence sharing thread_id {thread!r}**")
+        st.caption("A thread may contain multiple messages; this is not proof that any two rows are copies of the same message.")
+        st.dataframe(_pretty_event_rows(related), use_container_width=True, hide_index=True) if related else st.info("No other records with this exact thread_id are present.")
+
+
+def _month_rows(rows: Sequence[Mapping[str, Any]], month_index: int) -> list[dict[str, Any]]:
+    return [dict(row) for row in rows if str(row.get("month_index", "")) == str(month_index)]
+
+
+def _render_round_inspector(st: Any, round_row: Mapping[str, Any],
+                           messages: Sequence[Mapping[str, Any]] = ()) -> None:
+    title = (f"month_index={round_row.get('month_index')} · round={round_row.get('round')} · "
+             f"{round_row.get('award_status', 'status unavailable')}")
+    with st.expander(title):
+        st.caption(f"Thread/correlation ID: {round_row.get('thread_id', 'Unavailable')} · resource: {round_row.get('resource', 'Unavailable')} · pool: {round_row.get('resource_pool', 'Unavailable')}")
+        st.caption("The coordinator normalizes raw bids by the maximum and ranks highest normalized need first; ties use alphabetical division name. The round policy allows at most one unit per village. A selected award is not confirmed until a matching village confirmation is recorded.")
+        thread = round_row.get("thread_id")
+        protocol_messages = [row for row in messages if thread and row.get("thread_id") == thread]
+        st.markdown("**Observed protocol messages for this thread**")
+        if protocol_messages:
+            st.dataframe([{
+                "timestamp": row.get("timestamp"), "sender": row.get("sender"),
+                "receiver": row.get("receiver"), "performative": row.get("performative"),
+                "direction": row.get("direction"), "type": row.get("message_type"),
+                "month_index": row.get("month_index"), "round": row.get("round"),
+                "thread_id": row.get("thread_id"), "payload": row.get("payload"),
+            } for row in protocol_messages], use_container_width=True, hide_index=True)
+        else:
+            st.info("No message-log rows with this exact round thread_id are available; the round JSON remains a persisted coordinator result.")
+        states = round_row.get("state_history", [])
+        st.write({"Phase history": states if isinstance(states, list) else "Unavailable",
+                  "Selected winner": round_row.get("selected_winner"),
+                  "Confirmed winner": round_row.get("winner"),
+                  "Allocation successful": round_row.get("allocation_successful", "Unavailable")})
+        for key, label in (("proposals", "Eligible proposals"), ("refusals", "Refusals"),
+                           ("ineligible_proposals", "Ineligible proposals"),
+                           ("selected_awardees", "Selected awardees and confirmation state"),
+                           ("missing_recipients", "Missing recipients"),
+                           ("timed_out_recipients", "Proposal timeouts"),
+                           ("confirmation_timeouts", "Confirmation timeouts"),
+                           ("malformed_replies", "Malformed replies"),
+                           ("unmatched_replies", "Unmatched replies"),
+                           ("protocol_errors", "Protocol errors")):
+            st.markdown(f"**{label}**")
+            value = round_row.get(key)
+            if value:
+                if isinstance(value, (dict, list)):
+                    st.json(value)
+                else:
+                    st.write(value)
+            else:
+                st.caption("No records in this artifact.")
+        if round_row.get("award_status") in {"confirmed", "partially_confirmed"}:
+            st.success("Confirmed award evidence is present for the listed village(s).")
+        elif round_row.get("selected_awardees"):
+            st.warning("Awardees were selected, but the result does not confirm every selected award.")
+
+
+def _render_monthly_details(st: Any, details: SimulationRunDetails) -> None:
+    st.subheader("Month-by-month results")
+    manifest = details.manifest or {}
+    month_rows = manifest.get("month_status", [])
+    if not isinstance(month_rows, list):
+        month_rows = []
+    indexes = sorted({int(row["month_index"]) for row in month_rows
+                      if isinstance(row, Mapping) and isinstance(row.get("month_index"), int)} |
+                     {int(row["month_index"]) for row in details.risk_records.rows
+                      if isinstance(row.get("month_index"), int)} |
+                     {int(row["month_index"]) for row in details.well_scores.rows
+                      if str(row.get("month_index", "")).isdigit()} |
+                     {int(row["month_index"]) for row in details.hotspots.rows
+                      if isinstance(row.get("month_index"), int)} |
+                     {int(row["month_index"]) for row in details.alerts.rows
+                      if isinstance(row.get("month_index"), int)} |
+                     {int(row["month_index"]) for row in details.rounds.rows
+                      if isinstance(row.get("month_index"), int)} |
+                     {int(row["month_index"]) for row in details.events
+                      if isinstance(row.get("month_index"), int)} |
+                     {int(row["month_index"]) for row in details.messages
+                      if isinstance(row.get("month_index"), int)})
+    if not indexes:
+        st.info("No month-indexed results are available yet.")
+        return
+    for index in indexes:
+        with st.expander(f"month_index {index}"):
+            month_status = next((row for row in month_rows if row.get("month_index") == index), {})
+            if not month_status:
+                started_event = next((event for event in details.events
+                                      if event.get("event_type") == "month_started"
+                                      and event.get("month_index") == index), {})
+                end_event = next((event for event in reversed(details.events)
+                                  if event.get("event_type") in {"month_completed", "month_failed"}
+                                  and event.get("month_index") == index), {})
+                month_status = {
+                    "calendar_month": started_event.get("calendar_month"),
+                    "status": end_event.get("status", "running" if started_event else "unknown"),
+                    **{event.get("stage"): event.get("status") for event in details.events
+                       if event.get("event_type") == "month_stage" and event.get("month_index") == index
+                       and isinstance(event.get("stage"), str)},
+                }
+            st.write({"month_index": index, "calendar_month": month_status.get("calendar_month", "Unavailable"),
+                      "month status": month_status.get("status", "Unavailable"),
+                      "clock tick": month_status.get("clock_tick", "Unavailable"),
+                      "risk delivery": month_status.get("risk_delivery", "Unavailable"),
+                      "hotspot screening": month_status.get("hotspot_screening", "Unavailable"),
+                      "alert decisions": month_status.get("alert_decisions", "Unavailable"),
+                      "Contract Net": month_status.get("contract_net", "Unavailable")})
+            reading_rows = [row for row in details.messages
+                            if row.get("message_type") == "well_readings"
+                            and str(row.get("month_index")) == str(index)]
+            st.caption(f"Observed well_readings message-log rows: {len(reading_rows)} (sent/received log copies are retained separately). Well-score artifact rows: {len(_month_rows(details.well_scores.rows, index))}.")
+            for artifact_name, artifact in (("Risk records", details.risk_records),
+                                             ("Village-level WQI/risk score details", details.risk_scores),
+                                             ("Well-level scores and indicator ratings", details.well_scores),
+                                             ("Hotspot screening evidence", details.hotspots),
+                                             ("Alert decisions and simulated inbox delivery", details.alerts)):
+                st.markdown(f"**{artifact_name} · {artifact.status}**")
+                relevant = _month_rows(artifact.rows, index)
+                if relevant:
+                    _render_page_table(st, artifact_name, relevant, key=f"run_month_{index}_{artifact_name}")
+                else:
+                    st.info(f"{artifact.message} No {artifact_name.casefold()} rows are recorded for this month_index.")
+            round_rows = [row for row in details.rounds.rows if row.get("month_index") == index]
+            if round_rows:
+                st.markdown("**Contract Net round details**")
+                for row in round_rows:
+                    _render_round_inspector(st, row, details.messages)
+            else:
+                st.info(f"Round results: {details.rounds.status}; no round artifact for month_index {index}.")
+
+
+def _status_callout(st: Any, status: str, run_id: Any) -> None:
+    message = f"Run {run_id} · {_display_run_status(status)}"
+    if status == "failed":
+        st.error(message)
+    elif status == "completed_with_unavailable_stages":
+        st.warning(message + " · some stages have unavailable evidence")
+    elif status == "completed":
+        st.success(message)
+    elif status in {"queued", "running"}:
+        st.info(message + " · refreshing persisted run evidence")
+    else:
+        st.warning(message + " · status is not confirmed")
+
+
+def _render_agent_cards(st: Any, cards: Sequence[Mapping[str, Any]]) -> None:
+    st.subheader("Agent activity")
+    if not cards:
+        st.info("No agent identities have been observed yet. Status and activity are unknown.")
+        return
+    for offset in range(0, len(cards), 3):
+        columns = st.columns(min(3, len(cards) - offset))
+        for column, card in zip(columns, cards[offset:offset + 3]):
+            with column.container(border=True):
+                st.markdown(f"**{card['name']}**")
+                st.caption(str(card.get("identity", "Identity unavailable")))
+                state = str(card.get("status", "unknown"))
+                if state == "running":
+                    st.info("Running")
+                elif state == "waiting":
+                    st.warning("Waiting")
+                elif state == "completed":
+                    st.success("Completed")
+                elif state == "failed":
+                    st.error("Failed")
+                elif state == "starting":
+                    st.warning("Starting")
+                else:
+                    st.warning("Status unknown/stale")
+                st.markdown(f"**Activity:** {card['activity']}")
+                st.caption(f"Latest input: {card['latest_input']}")
+                st.caption(f"Latest result: {card['latest_result']}")
+                st.caption(f"Output recipient: {card['output_to']}")
+
+
+def _render_collaboration_flow(st: Any, flow: Mapping[str, Any]) -> None:
+    st.subheader("How the agents collaborate")
+    st.caption("Solid arrows use observed sent rows from the seven-column SPADE log. Dashed arrows show runner/input orchestration and are not agent messages.")
+    st.caption("The runner fans risk evidence to village, collector, hotspot, and alert agents; it waits for the risk, hotspot, and alert stages before launching that month's Contract Net round. The diagram distinguishes those runner-controlled steps from logged SPADE messages.")
+    rows = []
+    for edge in flow.get("message_edges", ()):
+        types = ", ".join(edge.get("message_types", ())) or "typed message"
+        rows.append((edge.get("source", "Unknown"), edge.get("target", "Unknown"),
+                     f"{types} · {edge.get('sent_log_rows', 'Unavailable')} sent log row(s)", "message"))
+    for edge in flow.get("runner_orchestration", ()):
+        rows.append((edge.get("source", "SimulationRunner"), edge.get("target", "Unknown"),
+                     edge.get("evidence", "runner coordination"), "orchestration"))
+    if rows:
+        pieces = ["<div style='display:flex;flex-direction:column;gap:8px'>"]
+        for source, target, evidence, kind in rows:
+            dash = "dashed" if kind == "orchestration" else "solid"
+            color = "#64748b" if kind == "orchestration" else "#15803d"
+            pieces.append(
+                "<div style='display:grid;grid-template-columns:minmax(130px,1fr) 34px minmax(130px,1fr) 2fr;"
+                "align-items:center;gap:10px;padding:10px;border:1px " + dash + " " + color + ";border-radius:10px'>"
+                "<span style='font-weight:600'>" + html.escape(str(source)) + "</span>"
+                "<span style='color:" + color + ";font-size:20px;text-align:center'>→</span>"
+                "<span style='font-weight:600'>" + html.escape(str(target)) + "</span>"
+                "<span style='color:#64748b;font-size:0.85em'>" + html.escape(str(evidence)) + "</span></div>"
+            )
+        pieces.append("</div>")
+        st.markdown("".join(pieces), unsafe_allow_html=True)
+    else:
+        st.info("No handoff rows have been recorded yet. No agent-to-agent flow is inferred.")
+    st.caption(f"Input source: {flow.get('input_label', 'Input source unavailable')}.")
+    if flow.get("message_status") != "available":
+        st.caption(f"Message evidence: {flow.get('message_status')}; missing messages are not inferred.")
+
+
+def _render_decision_group(st: Any, title: str, rows: Sequence[Mapping[str, Any]], status: str,
+                           *, kind: str) -> None:
+    st.markdown(f"#### {title}")
+    if not rows:
+        st.info(f"{title} unavailable · {status}")
+        return
+    for index, row in enumerate(rows):
+        month = row.get("month_index", "Unavailable")
+        division = row.get("division", "Unavailable")
+        if kind == "risk":
+            summary = f"{row.get('tier', 'Unavailable')} · WQI {row.get('wqi', 'Unavailable')}"
+            source = "RiskScoringAgent result"
+        elif kind == "allocation":
+            summary = "Confirmed award" if row.get("confirmed_winner") else f"Selected · {row.get('status', 'confirmation unavailable')}"
+            source = f"ResourceCoordinatorAgent result · {row.get('evidence', 'round artifact unavailable')}"
+        elif kind == "hotspot":
+            summary = str(row.get("status", "Unavailable"))
+            source = "HotspotAgent screening evidence"
+        else:
+            delivery = row.get("delivery", "Unavailable")
+            summary = f"{row.get('decision', 'Unavailable')} · delivery: {delivery}"
+            if delivery == "confirmed":
+                summary += " (simulated inbox acknowledged)"
+            source = "AlertProcessingAgent result; inbox acknowledgement is local simulation only"
+        label = f"month_index {month} · {division} · {summary}"
+        with st.expander(label, expanded=False):
+            if kind == "hotspot":
+                st.write(f"Supporting month_index history: {row.get('history', 'Unavailable')}")
+            if kind == "risk":
+                st.write(f"Drivers: {row.get('drivers', 'Unavailable')}")
+            st.caption(f"Evidence: {source}")
+            if row.get("reason") not in (None, "", "Unavailable"):
+                st.write(f"Reason: {row['reason']}")
+            st.json(dict(row))
+
+
+def _render_final_decisions(st: Any, decisions: Mapping[str, Any], status: str) -> None:
+    st.subheader("Simulation results")
+    st.caption("Final items link to their recorded agent result or artifact. Only confirmed Contract Net awards are labelled confirmed.")
+    left, right = st.columns(2)
+    with left:
+        _render_decision_group(st, "Risk by village", decisions["risks"], decisions["risk_status"], kind="risk")
+        _render_decision_group(st, "Hotspot screening", decisions["hotspots"], decisions["hotspot_status"], kind="hotspot")
+    with right:
+        _render_decision_group(st, "Resource allocation", decisions["allocations"], decisions["allocation_status"], kind="allocation")
+        _render_decision_group(st, "Alerts and simulated inbox", decisions["alerts"], decisions["alert_status"], kind="alert")
+    if status == "failed" or decisions["failures"]:
+        st.error("The run records failure evidence.")
+        for failure in decisions["failures"]:
+            st.caption(str(failure))
+    if decisions["unavailable_stages"]:
+        st.warning("Unavailable or incomplete stages")
+        for stage, reason in decisions["unavailable_stages"]:
+            st.caption(f"{stage}: {reason}")
+    if decisions["evaluation_status"] in {"unavailable", "empty", "incomplete"}:
+        st.info(f"Evaluation metrics: {decisions['evaluation_status']}. Missing evidence is not reported as zero.")
+    for metric in decisions["unavailable_metrics"]:
+        st.caption(f"Evaluation · {metric['metric']}: {metric['status']} — {metric['details']}")
+
+
+def _render_run_detail_page(st: Any, details: SimulationRunDetails, lab_root: Path,
+                            control_path: Path) -> None:
+    manifest = details.manifest or {}
+    control = details.control or {}
+    run_id = manifest.get("run_id", control.get("run_id", "Unknown"))
+    resolved = get_run_status(str(manifest.get("run_id", control.get("run_id", ""))), lab_root)
+    status = (resolved.get("status") if resolved is not None
+              else manifest.get("status", control.get("status", "unknown")))
+    view = build_execution_view(details, run_status=str(status))
+    st.title("Simulation Lab · Agent execution")
+    st.caption("Synthetic illustrative run · reduced-parameter WQI · provisional screening")
+    _status_callout(st, str(status), run_id)
+    progress_cols = st.columns([3, 1])
+    if view["progress"] is not None:
+        progress_cols[0].progress(view["progress"], text=(
+            f"Months complete: {view['completed_months']} / {view['total_months']} · "
+            f"latest month_index: {view['latest_month_index'] if view['latest_month_index'] is not None else 'Unavailable'}"))
+    else:
+        progress_cols[0].info("Month progress unavailable until the run records its configuration or month events.")
+    progress_cols[1].metric("Agents observed", len(view["agents"]))
+    _render_agent_cards(st, view["agents"])
+    _render_collaboration_flow(st, view["flow"])
+    _render_final_decisions(st, view["decisions"], str(status))
+    st.caption("Water-quality indicators do not diagnose CKDu or establish that water caused CKDu. Heartbeats indicate liveness evidence, not correct behavior. Alert acknowledgements refer to the simulated inbox, not an external health officer.")
+
+    with st.expander("Technical details", expanded=False):
+        provenance = manifest.get("provenance", {})
+        config = manifest.get("configuration", {})
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+        if not isinstance(config, Mapping):
+            config = {}
+        st.caption(f"Selected isolated run: {details.run_dir}")
+        st.json({"run_id": run_id, "status": status, "started_at": manifest.get("started_at", control.get("created_at", "Unavailable")),
+                 "completed_at": manifest.get("completed_at", "Unavailable"),
+                 "duration": _format_run_duration(manifest), "provenance": provenance,
+                 "configuration": config, "control": control})
+        stage_status = manifest.get("stage_status", {})
+        if isinstance(stage_status, Mapping) and stage_status:
+            st.dataframe([{"Stage": key, "Status": value} for key, value in stage_status.items()],
+                         use_container_width=True, hide_index=True)
+        if details.errors:
+            with st.expander("Incomplete or partially written artifacts"):
+                for error in details.errors:
+                    st.warning(error)
+        _render_run_timeline(st, details)
+        _render_agent_execution(st, details)
+        _render_message_inspector(st, details)
+        _render_monthly_details(st, details)
+        st.subheader("Evaluation detail")
+        st.caption(f"Evaluation artifact: {details.evaluation.status} · {details.evaluation.message}")
+        evaluation_dataset = Dataset(
+            tuple({str(k): str(v) for k, v in row.items()} for row in details.evaluation.rows),
+            details.evaluation.status, details.evaluation.message,
+            "Selected run's persisted evaluation_summary.csv", tuple(EVALUATION_COLUMNS),
+        )
+        _render_evaluation_summary(
+            st, evaluation_dataset, allocation_results_verified=False,
+            context="Allocation comparisons remain unavailable unless provenance, baselines, population/risk inputs, and an approved risk-weight definition are supplied.",
+        )
 
 
 def _live_coordination_model(snapshot: AgentMonitorSnapshot) -> dict[str, Any]:
@@ -797,6 +1401,19 @@ def _coordination_event_source(event: Mapping[str, Any]) -> str:
     }:
         return "Runner lifecycle/work observation"
     return "Agent behavior event journal"
+
+
+def _live_coordination_run_options(configured_run: str | None, lab_root: Path) -> tuple[tuple[str, Path], ...]:
+    """Return an explicitly configured run and available lab-created run directories."""
+    options: list[tuple[str, Path]] = []
+    if configured_run:
+        configured_path = Path(configured_run).expanduser()
+        options.append((f"Configured run · {configured_path}", configured_path))
+    for row in list_lab_runs(lab_root):
+        path = Path(row["run_dir"])
+        if all(existing.resolve() != path.resolve() for _label, existing in options):
+            options.append((f"Simulation Lab · {row['run_id']} · {row['status']}", path))
+    return tuple(options)
 
 
 def _render_live_coordination_snapshot(st: Any, snapshot: AgentMonitorSnapshot) -> None:
@@ -889,6 +1506,16 @@ def _render_live_coordination_snapshot(st: Any, snapshot: AgentMonitorSnapshot) 
         st.dataframe(list(model["alerts"]), use_container_width=True)
     else:
         st.info(f"Alert outcomes {model['alerts_status']}.")
+    evaluation = _read_csv(
+        snapshot.run_dir / "logs" / "evaluation_summary.csv",
+        EVALUATION_COLUMNS,
+        "Persisted evaluator summary for this selected SPADE run",
+    )
+    _render_evaluation_summary(
+        st, evaluation, allocation_results_verified=False,
+        context=("Allocation comparisons remain unavailable unless provenance, required inputs, "
+                 "baselines, and the risk-weight definition are verified."),
+    )
     if model["errors"]:
         with st.expander("Incomplete or malformed run data"):
             for error in model["errors"]:
@@ -903,6 +1530,194 @@ def _render_live_coordination(st: Any, run_dir: Path | None) -> None:
     _render_live_coordination_snapshot(st, load_agent_monitor(run_dir))
 
 
+def _render_lab_runs(st: Any, lab_root: Path) -> tuple[dict[str, Any], ...]:
+    runs = _lab_run_history_rows(lab_root)
+    st.markdown("#### Simulation Lab run history")
+    if not runs:
+        st.info("No Simulation Lab runs have been launched from this configured lab directory.")
+        return ()
+    shown = [{key: value for key, value in row.items() if not key.startswith("_")} for row in runs]
+    session = getattr(st, "session_state", {})
+    epoch = session.get("simulation_lab_history_epoch", 0) if hasattr(session, "get") else 0
+    selection = st.dataframe(
+        shown, use_container_width=True, hide_index=True,
+        on_select="rerun", selection_mode="single-row",
+        key=f"simulation_lab_run_history_{epoch}",
+    )
+    selected_id = _selected_run_id(selection, shown)
+    if selected_id and hasattr(st, "session_state"):
+        st.session_state["simulation_lab_selected_run_id"] = selected_id
+    failed_runs = [row for row in runs if row.get("Status") == "failed"]
+    if failed_runs:
+        with st.expander("Failed-run process details"):
+            for row in failed_runs:
+                matching = next((item for item in list_lab_runs(lab_root)
+                                 if item.get("run_id") == row.get("Run ID")), {})
+                st.markdown(f"**{row.get('Run ID')}**: {matching.get('error') or 'Failure detail unavailable'}")
+                st.code(read_process_log_tail(matching.get("process_log", "")), language="text")
+    st.caption("Select a row to open that isolated run's details. Previously completed runs remain available for selection.")
+    return runs
+
+
+def _render_simulation_lab(st: Any, lab_root: Path) -> None:
+    st.subheader("Simulation Lab")
+    session = getattr(st, "session_state", {})
+    selected_id = session.get("simulation_lab_selected_run_id") if hasattr(session, "get") else None
+    history_rows = _lab_run_history_rows(lab_root)
+    selected_row = next((row for row in history_rows if row.get("Run ID") == selected_id), None)
+    if selected_id and selected_row is None and hasattr(st, "session_state"):
+        st.session_state.pop("simulation_lab_selected_run_id", None)
+    if selected_row is not None:
+        if st.button("← Back to Simulation Lab", key="simulation_lab_back_to_form"):
+            if hasattr(st, "session_state"):
+                st.session_state.pop("simulation_lab_selected_run_id", None)
+                st.session_state["simulation_lab_history_epoch"] = session.get("simulation_lab_history_epoch", 0) + 1
+            st.rerun()
+        with st.expander("Run history and saved runs"):
+            _render_lab_runs(st, lab_root)
+        current = next((row for row in list_lab_runs(lab_root) if row.get("run_id") == selected_id), None)
+        if current is None:
+            st.warning("The selected run record is unavailable.")
+            return
+        status = current.get("status", "unknown")
+
+        def render_selected_run() -> None:
+            details = load_simulation_run_details(
+                selected_row["_run_dir"], lab_root=lab_root,
+                control_path=selected_row["_control_path"],
+            )
+            _render_run_detail_page(st, details, lab_root, selected_row["_control_path"])
+
+        if status in {"queued", "running"} and hasattr(st, "fragment"):
+            @st.fragment(run_every=2)
+            def refresh_selected_run():
+                render_selected_run()
+            refresh_selected_run()
+        else:
+            render_selected_run()
+        return
+
+    st.caption("Runs the existing SPADE multi-agent simulation in a background process. Inputs and results are isolated under the configured Simulation Lab directory.")
+    st.warning("The built-in and accepted uploaded inputs are synthetic seasonal readings. Repeated seasonal values are expanded by the existing runner and are not new monthly measurements.")
+    _render_lab_runs(st, lab_root)
+
+    source = st.radio("Simulation input", ("Built-in synthetic sample", "Upload synthetic CSV"),
+                      horizontal=True, key="simulation_lab_input_source")
+    selected_input: Path | None = None
+    uploaded_bytes: bytes | None = None
+    input_error: str | None = None
+    preview_rows: tuple[dict[str, str], ...] = ()
+    row_count: int | None = None
+    if source == "Built-in synthetic sample":
+        try:
+            preview = validate_input_path(SAMPLE_INPUT)
+            selected_input = SAMPLE_INPUT
+            preview_rows, row_count = preview.preview, preview.row_count
+            st.success(f"Validated {row_count} rows from {preview.source_label}.")
+        except (OSError, ValueError) as exc:
+            input_error = str(exc)
+    else:
+        upload = st.file_uploader("Upload seasonal well-readings CSV", type=("csv",), key="simulation_lab_csv")
+        if upload is not None:
+            uploaded_bytes = upload.getvalue()
+            try:
+                preview = validate_input_bytes(uploaded_bytes)
+                preview_rows, row_count = preview.preview, preview.row_count
+                st.success(f"Validated {row_count} rows. Source labels are synthetic and will be preserved.")
+            except (OSError, UnicodeError, csv.Error, ValueError) as exc:
+                input_error = str(exc)
+    if input_error:
+        st.error(f"Input unavailable: {input_error}")
+    if preview_rows:
+        st.caption("Preview: exact existing seasonal input schema; additional or missing columns are rejected.")
+        st.dataframe(list(preview_rows), use_container_width=True)
+
+    st.markdown("#### Run configuration")
+    with st.form("simulation_lab_run_form"):
+        left, middle, right = st.columns(3)
+        start_index = left.number_input("Start month_index", min_value=0, max_value=10000,
+                                        value=0, step=1)
+        month_count = middle.number_input("Number of simulated months", min_value=1, max_value=24,
+                                          value=2, step=1)
+        first_month = right.selectbox("Calendar month for first month_index",
+                                      tuple(range(1, 13)), index=9,
+                                      format_func=lambda value: f"{value:02d}")
+        resource = st.selectbox("Resource type", tuple(sorted(RESOURCES)))
+        resource_pool = st.number_input("Resource pool (integer units)", min_value=0,
+                                        max_value=10000, value=1, step=1)
+        round_number = st.number_input("Contract Net round number", min_value=0,
+                                        max_value=10000, value=1, step=1)
+        timeout_cols = st.columns(3)
+        proposal_timeout = timeout_cols[0].number_input("Proposal timeout (s)", min_value=0.1,
+                                                       value=2.0, step=0.5)
+        confirmation_timeout = timeout_cols[1].number_input("Confirmation timeout (s)", min_value=0.1,
+                                                            value=2.0, step=0.5)
+        stage_timeout = timeout_cols[2].number_input("Stage timeout (s)", min_value=0.1,
+                                                     value=30.0, step=1.0)
+        with st.expander("Additional timeouts and provisional hotspot screening"):
+            extra_cols = st.columns(4)
+            hotspot_timeout = extra_cols[0].number_input("Hotspot stage timeout (s)", min_value=0.1,
+                                                         value=5.0, step=0.5)
+            alert_receive_timeout = extra_cols[1].number_input("Alert receive timeout (s)", min_value=0.1,
+                                                              value=0.2, step=0.1)
+            alert_timeout = extra_cols[2].number_input("Alert stage timeout (s)", min_value=0.1,
+                                                      value=5.0, step=0.5)
+            ack_timeout = extra_cols[3].number_input("Inbox acknowledgement timeout (s)", min_value=0.1,
+                                                     value=2.0, step=0.5)
+            st.caption("Hotspot screening is optional and project-defined, not validated epidemiology. Leaving it off keeps screening and dependent alerts unavailable where no configured rule exists.")
+            enable_hotspot = st.checkbox("Configure a provisional tier-persistence screen", value=False)
+            trigger_tiers = st.multiselect(
+                "Trigger tiers (Unknown is excluded)",
+                options=tuple(sorted(KNOWN_TIERS - {"Unknown"})), default=(),
+                disabled=not enable_hotspot,
+            )
+            consecutive_months = st.number_input("Required consecutive month_index records",
+                                                 min_value=1, max_value=24, value=2, step=1,
+                                                 disabled=not enable_hotspot)
+            if enable_hotspot:
+                st.warning("The selected tier set and persistence window are provisional user configuration, not a validated medical or epidemiological rule.")
+        active_runs = [row for row in list_lab_runs(lab_root)
+                       if row.get("status") in {"queued", "running"}]
+        submitted = st.form_submit_button("Run Simulation", disabled=bool(active_runs))
+
+    if active_runs:
+        st.warning(f"A simulation is already {active_runs[0]['status']} ({active_runs[0]['run_id']}). Wait for it to finish before launching another.")
+    if submitted:
+        if input_error or (selected_input is None and uploaded_bytes is None):
+            st.error("Select a valid synthetic input before starting the runner.")
+        else:
+            try:
+                settings = SimulationSettings(
+                    start_month_index=int(start_index), month_count=int(month_count),
+                    first_calendar_month=int(first_month), resource=resource,
+                    resource_pool=int(resource_pool), round_number=int(round_number),
+                    proposal_timeout_s=float(proposal_timeout),
+                    confirmation_timeout_s=float(confirmation_timeout), stage_timeout_s=float(stage_timeout),
+                    hotspot_stage_timeout_s=float(hotspot_timeout),
+                    alert_receive_timeout_s=float(alert_receive_timeout),
+                    alert_stage_timeout_s=float(alert_timeout),
+                    alert_acknowledgement_timeout_s=float(ack_timeout),
+                    hotspot_trigger_tiers=tuple(trigger_tiers) if enable_hotspot else (),
+                    hotspot_consecutive_months=int(consecutive_months) if enable_hotspot else None,
+                )
+                launched = launch_simulation(
+                    lab_root, settings, input_path=selected_input if uploaded_bytes is None else None,
+                    uploaded_csv=uploaded_bytes,
+                )
+                if launched["status"] == "failed":
+                    st.error(f"Simulation {launched['run_id']} failed to start: {launched.get('error')}")
+                else:
+                    if hasattr(st, "session_state"):
+                        st.session_state["simulation_lab_selected_run_id"] = launched["run_id"]
+                    st.success(f"Simulation {launched['run_id']} {launched['status']}. Output: {launched['run_dir']}")
+                    st.rerun()
+            except (OSError, ValueError, RuntimeError, FileExistsError) as exc:
+                st.error(f"Simulation was not started: {exc}")
+
+    if st.button("Refresh run history"):
+        st.rerun()
+
+
 def main() -> None:
     try:
         import streamlit as st
@@ -915,7 +1730,8 @@ def main() -> None:
     data_root = Path(os.environ.get("CKDU_DATA_ROOT", ROOT / "data"))
     demo_output = os.environ.get("CKDU_DEMO_OUTPUT_DIR")
     simulation_run = os.environ.get("CKDU_SIMULATION_RUN_DIR")
-    views = ("Team outputs", "Illustrative demo fixtures") + (("Generated local demo",) if demo_output else ()) + ("Agent Monitor", "Live Coordination")
+    lab_root = Path(os.environ.get("CKDU_SIMULATION_LAB_DIR", default_lab_root())).expanduser()
+    views = ("Team outputs", "Illustrative demo fixtures") + (("Generated local demo",) if demo_output else ()) + ("Agent Monitor", "Live Coordination", "Simulation Lab")
     default_view = views.index("Generated local demo") if demo_output else 0
     view = st.radio("Data view", views, index=default_view, horizontal=True)
     if view == "Agent Monitor":
@@ -939,9 +1755,14 @@ def main() -> None:
             st.caption("The WQI uses the project's reduced parameter set; hotspot screening is provisional.")
         return
     if view == "Live Coordination":
-        monitor_dir = Path(simulation_run).expanduser() if simulation_run else None
-        if monitor_dir is not None:
-            st.caption("Configured run path: CKDU_SIMULATION_RUN_DIR. In Compose this is /app/simulation_run, mounted from CKDU_SIMULATION_RUN_HOST_DIR on the host.")
+        run_options = _live_coordination_run_options(simulation_run, lab_root)
+        if run_options:
+            selected_label = st.selectbox("Simulation run", tuple(label for label, _path in run_options),
+                                          key="live_coordination_run_selector")
+            monitor_dir = next(path for label, path in run_options if label == selected_label)
+            st.caption("Configured Compose runs use /app/simulation_run. Simulation Lab runs are read from their isolated run directory.")
+        else:
+            monitor_dir = None
         if hasattr(st, "fragment"):
             @st.fragment(run_every=2)
             def refresh_coordination():
@@ -955,6 +1776,13 @@ def main() -> None:
             st.caption("Water-quality/risk indicators do not diagnose CKDu or establish that water caused CKDu.")
             st.caption("The WQI uses a reduced parameter set; hotspot screening is provisional. Missing and Unknown evidence remains unavailable.")
             st.caption("Alert acknowledgements refer to the simulated inbox only, not an external health officer.")
+        return
+    if view == "Simulation Lab":
+        _render_simulation_lab(st, lab_root)
+        with st.expander("Scientific and operational limitations"):
+            st.caption("The runner accepts the project's synthetic seasonal readings. It repeats seasonal values according to its existing expansion behavior; these are not new monthly observations.")
+            st.caption("The WQI uses a reduced parameter set and does not diagnose CKDu or establish causation. Hotspot rules are provisional and user-configured.")
+            st.caption("Allocation results are local SPADE simulation outputs, not verified Member C results. Alert acknowledgement is to a simulated inbox only.")
         return
     if view == "Generated local demo":
         _render_local_demo(st, Path(demo_output))
