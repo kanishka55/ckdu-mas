@@ -76,6 +76,12 @@ class AgentMonitorParsingTests(unittest.TestCase):
                                                 "identity": "risk@localhost"}), (),
                                       run_status="completed", run_fresh=False)
         self.assertEqual(stopped[0]["Status"], "completed")
+        failed = derive_agent_states(
+            ({"event_type": "agent_start_failed", "timestamp": timestamp,
+              "component": "RiskScoringAgent", "identity": "risk@localhost"},),
+            (), run_status="failed", run_fresh=False, now=observed_at,
+        )
+        self.assertEqual(failed[0]["Status"], "failed")
         unknown = derive_agent_states((), (), run_status="running", run_fresh=True)
         self.assertEqual(unknown, ())
 
