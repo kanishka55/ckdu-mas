@@ -15,7 +15,7 @@ from src.core.hotspot_screening import ScreeningRule
 from src.sim.runner import (
     SimulationConfig,
     _has_complete_negotiation_history,
-    _has_unavailable_stages,
+    _has_operational_gaps,
     _write_confirmed_allocation_rows,
     run_simulation,
     validate_output_dir,
@@ -95,33 +95,72 @@ class SimulationRunnerConfigurationTests(unittest.TestCase):
                 root, ["rounds/round-0.json"], months, recipient_count=3, round_number=1,
             ))
 
-    def test_success_status_is_based_on_recorded_stage_and_metric_evidence(self):
-        complete = {
-            "stage_status": {"risk_scoring": "complete", "hotspot_screening": "screening_outputs_recorded"},
-            "months": [{"status": "complete", "hotspot_screening": "complete",
-                        "alert_decisions": "complete", "alert_delivery": {"unavailable": 0}}],
-            "evaluation_status": {"example_metric": {"status": "ok", "value": 1}},
-            "failures": [],
+    def test_operational_completion_ignores_expected_warmup_and_optional_metrics(self):
+        stage_status = {
+            "risk_scoring": "complete",
+            "hotspot_screening": "screening_outputs_recorded",
+            "hotspot_agent": "processed_risk_records",
+            "alert_decisions": "processed_typed_risk_and_hotspot_messages",
+            "contract_net": "single_round_per_completed_month",
         }
-        incomplete = {
-            **complete,
-            "months": [{"status": "complete", "hotspot_screening": "partially_unavailable",
-                        "alert_delivery": {"unavailable": 1}}],
+        months = [
+            {"status": "complete", "risk_delivery": "complete",
+             "hotspot_screening": "expected_warmup", "alert_decisions": "expected_warmup",
+             "alert_delivery": {"unavailable": 11, "failed": 0}, "contract_net": "confirmed"},
+            {"status": "complete", "risk_delivery": "complete",
+             "hotspot_screening": "complete", "alert_decisions": "complete",
+             "alert_delivery": {"unavailable": 0, "failed": 0}, "contract_net": "confirmed"},
+        ]
+        self.assertFalse(_has_operational_gaps(stage_status, months, []))
+
+    def test_operational_gaps_cover_unexpected_failures_and_missing_outputs(self):
+        complete_stages = {
+            "risk_scoring": "complete",
+            "hotspot_screening": "screening_outputs_recorded",
+            "hotspot_agent": "processed_risk_records",
+            "alert_decisions": "processed_typed_risk_and_hotspot_messages",
+            "contract_net": "single_round_per_completed_month",
         }
-        self.assertFalse(_has_unavailable_stages(
-            complete["stage_status"], complete["months"],
-            complete["evaluation_status"], complete["failures"],
-        ))
-        self.assertTrue(_has_unavailable_stages(
-            incomplete["stage_status"], incomplete["months"],
-            incomplete["evaluation_status"], {"failures": incomplete["failures"]},
-        ))
-        metric_unavailable = {"metric": {"status": "unavailable", "value": None}}
-        self.assertTrue(_has_unavailable_stages(complete["stage_status"], complete["months"],
-                                                metric_unavailable, []))
-        self.assertTrue(_has_unavailable_stages(complete["stage_status"], complete["months"],
-                                                complete["evaluation_status"],
-                                                {"failures": [{"stage": "output", "error": "write failed"}]}))
+        complete_month = {"status": "complete", "risk_delivery": "complete",
+                          "hotspot_screening": "complete", "alert_decisions": "complete",
+                          "alert_delivery": {"failed": 0}, "contract_net": "confirmed"}
+        self.assertFalse(_has_operational_gaps(complete_stages, [complete_month], []))
+        cases = (
+            ("unexpected hotspot failure", complete_stages,
+             [{**complete_month, "hotspot_screening": "partially_unavailable"}], []),
+            ("missing risk records", complete_stages,
+             [{**complete_month, "status": "incomplete", "risk_delivery": "unavailable"}], []),
+            ("failed Contract Net", complete_stages,
+             [{**complete_month, "contract_net": "failed"}], []),
+            ("alert delivery failure", complete_stages,
+             [{**complete_month, "alert_delivery": {"failed": 1}}], []),
+            ("recorded execution failure", complete_stages, [complete_month],
+             [{"stage": "agent", "error": "failed"}]),
+        )
+        for name, stages, months, failures in cases:
+            with self.subTest(name=name):
+                self.assertTrue(_has_operational_gaps(stages, months, failures))
+
+    def test_fully_successful_run_with_complete_evaluation_is_operationally_complete(self):
+        stage_status = {
+            "risk_scoring": "complete",
+            "hotspot_screening": "screening_outputs_recorded",
+            "hotspot_agent": "processed_risk_records",
+            "alert_decisions": "processed_typed_risk_and_hotspot_messages",
+            "contract_net": "single_round_per_completed_month",
+        }
+        month_status = [{
+            "status": "complete", "risk_delivery": "complete",
+            "hotspot_screening": "complete", "alert_decisions": "complete",
+            "alert_delivery": {"failed": 0}, "contract_net": "confirmed",
+        }]
+        evaluation_status = {
+            "risk_classification_alignment": {"status": "ok", "value": 1.0},
+            "allocation_efficiency": {"status": "ok", "value": 1.0},
+        }
+
+        self.assertTrue(all(metric["status"] == "ok" for metric in evaluation_status.values()))
+        self.assertFalse(_has_operational_gaps(stage_status, month_status, []))
 
     def test_clock_tick_uses_explicit_calendar_month_and_shared_schema(self):
         body = ClockAgent.tick_body(17, 10)
@@ -217,10 +256,15 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             spade.run(scenario(), embedded_xmpp_server=True)
             result = result_holder["manifest"]
 
-            self.assertEqual(result["status"], "completed_with_unavailable_stages")
+            self.assertEqual(result["status"], "completed")
             self.assertEqual([month["month_index"] for month in result["month_status"]], [0, 1])
             self.assertTrue(all(month["risk_delivery"] == "complete" for month in result["month_status"]))
             self.assertTrue(all(month["contract_net"] != "pending" for month in result["month_status"]))
+            self.assertEqual(result["month_status"][0]["hotspot_screening"], "expected_warmup")
+            self.assertEqual(result["month_status"][0]["alert_decisions"], "expected_warmup")
+            self.assertEqual(result["evaluation_status"]["allocation_efficiency"]["status"], "unavailable")
+            self.assertEqual(result["evaluation_status"]["risk_classification_alignment"]["status"],
+                             "unavailable")
             self.assertEqual(result["stage_status"]["hotspot_agent"], "processed_risk_records")
             self.assertEqual(result["stage_status"]["alert_transport"],
                              "local_simulated_inbox_not_real_health_officer")

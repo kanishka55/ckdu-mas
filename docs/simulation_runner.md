@@ -16,6 +16,26 @@ calendar mapping is supplied explicitly using one calendar label per simulated `
 Neither is derived from the other by the runner. The source seasonal values are expanded using the
 existing `wells.expand_to_months` behavior; repeated seasonal rows are not new monthly measurements.
 
+## Run status and evaluation availability
+
+The top-level manifest status describes operational execution. `completed` means
+the configured required stages produced their operational outcomes without a
+recorded execution failure. An expected initial `expected_warmup` result for a
+configured multi-month hotspot rule, and alert unavailability caused by that
+warm-up, do not make the run operationally incomplete. They remain explicit in
+the per-month stage statuses, hotspot and alert artifacts, and dashboard result
+explanations. Unexpected missing risk records, incomplete screening or alert
+processing, failed alert delivery, an unsuccessful required Contract Net round,
+or recorded execution/cleanup failures keep the run at
+`completed_with_unavailable_stages` or `failed`, as appropriate.
+
+Evaluation availability is reported separately in `evaluation_status` and
+`logs/evaluation_summary.csv`. Missing independent reference tiers or approved
+allocation baselines/risk-weight provenance can leave metrics unavailable while
+the simulation is operationally `completed`. This does not mean scientific
+validation or complete evaluation evidence; the dashboard continues to list
+each unavailable metric and its missing evidence.
+
 ## UI Simulation Lab
 
 The dashboard's **Simulation Lab** page uses the same `src.sim.runner` SPADE runner. Select the

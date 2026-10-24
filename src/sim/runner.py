@@ -343,24 +343,65 @@ def _read_message_counts(path: Path) -> dict[str, Any]:
             "by_performative": dict(sorted(by_performative.items()))}
 
 
-def _has_unavailable_stages(*evidence_sections: Any) -> bool:
-    """Detect recorded partial, unavailable, or failed work without inspecting provenance text."""
-    status_tokens = ("unavailable", "partial", "incomplete", "failed", "skipped", "not_configured")
+def _has_operational_gaps(
+    stage_status: Mapping[str, Any],
+    months: Sequence[Mapping[str, Any]],
+    failures: Sequence[Any],
+) -> bool:
+    """Return whether required simulation work lacks a usable operational outcome.
 
-    def contains(value: Any, key: Any = None) -> bool:
-        if key == "failures" and isinstance(value, (list, tuple)):
-            return bool(value)
-        if key == "unavailable" and isinstance(value, (int, float)) and not isinstance(value, bool):
-            return value > 0
-        if isinstance(value, str):
-            return any(token in value.casefold() for token in status_tokens)
-        if isinstance(value, Mapping):
-            return any(contains(item, item_key) for item_key, item in value.items())
-        if isinstance(value, (list, tuple)):
-            return any(contains(item) for item in value)
+    Evaluation metrics are deliberately excluded: their availability describes evidence
+    for scientific comparisons, not whether the configured simulation ran. Expected
+    two-month hotspot/alert warm-up is represented explicitly as ``expected_warmup``.
+    """
+    if failures:
+        return True
+
+    required_stage_values = {
+        "risk_scoring": {"complete"},
+        "hotspot_screening": {"screening_outputs_recorded"},
+        "hotspot_agent": {"processed_risk_records"},
+        "alert_decisions": {"processed_typed_risk_and_hotspot_messages"},
+        "contract_net": {"single_round_per_completed_month"},
+    }
+    for stage, accepted in required_stage_values.items():
+        if stage_status.get(stage) not in accepted:
+            return True
+
+    bad_award_statuses = {
+        "partially_confirmed", "unconfirmed", "failed", "send_failed", "protocol_error",
+        "unavailable", "no_round_result", "skipped_missing_current_month_risk",
+    }
+    for month in months:
+        if month.get("status") != "complete" or month.get("risk_delivery") != "complete":
+            return True
+        if month.get("hotspot_screening") not in {"complete", "expected_warmup"}:
+            return True
+        if month.get("alert_decisions") not in {"complete", "expected_warmup"}:
+            return True
+        delivery = month.get("alert_delivery")
+        if isinstance(delivery, Mapping) and delivery.get("failed", 0) > 0:
+            return True
+        if month.get("contract_net") in bad_award_statuses:
+            return True
+    return False
+
+
+def _is_expected_hotspot_warmup(
+    month_index: int,
+    start_month_index: int,
+    rule: ScreeningRule | None,
+    screens: Sequence[Any],
+) -> bool:
+    """Recognize only the exact insufficient-history result inside the configured window."""
+    if rule is None or not screens or month_index >= start_month_index + rule.consecutive_months - 1:
         return False
-
-    return any(contains(section) for section in evidence_sections)
+    return all(
+        screen.status == "unavailable"
+        and screen.month_index == month_index
+        and screen.reason == "insufficient_consecutive_month_history"
+        for screen in screens
+    )
 
 
 def _has_complete_negotiation_history(
@@ -648,6 +689,9 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                     month_index, divisions, hotspot_agent, config.hotspot_stage_timeout_s,
                 )
             screens = hotspot_agent.finalize_month(month_index)
+            expected_hotspot_warmup = _is_expected_hotspot_warmup(
+                month_index, config.start_month_index, config.hotspot_rule, screens,
+            )
             await hotspot_agent.publish_month_results(month_index)
             for screen in screens:
                 _append_monitor_event(event_path, "hotspot_result", "HotspotAgent",
@@ -665,7 +709,21 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 await asyncio.sleep(0.02)
             alert_agent.expire_confirmations(float("inf"))
             month_alerts = [row for row in alert_agent.records if row.get("month_index") == month_index]
-            month_status["alert_decisions"] = "complete" if alerts_ready else "partially_unavailable"
+            expected_alert_warmup = (
+                expected_hotspot_warmup
+                and {row.get("ds_division") for row in month_alerts} == set(divisions)
+                and all(row.get("status") == "unavailable"
+                        and row.get("reason") == "hotspot_status_unavailable"
+                        for row in month_alerts)
+            )
+            alert_decisions_available = alerts_ready and all(
+                row.get("status") in {"emitted", "suppressed"} for row in month_alerts
+            )
+            month_status["alert_decisions"] = (
+                "expected_warmup" if expected_alert_warmup
+                else "complete" if alert_decisions_available
+                else "partially_unavailable"
+            )
             month_status["alert_delivery"] = {
                 "requested": sum(row.get("delivery_status") in {"requested", "sent", "confirmed", "failed"}
                                   for row in month_alerts),
@@ -676,7 +734,8 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 "unavailable": sum(row.get("status") == "unavailable" for row in month_alerts),
             }
             month_status["hotspot_screening"] = (
-                "complete" if hotspot_received and all(s.status != "unavailable" for s in screens)
+                "expected_warmup" if expected_hotspot_warmup
+                else "complete" if hotspot_received and all(s.status != "unavailable" for s in screens)
                 else "partially_unavailable"
             )
             _append_monitor_event(event_path, "month_stage", "SimulationRunner",
@@ -884,10 +943,8 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         manifest["message_counts"] = _read_message_counts(log_path)
         manifest["status"] = (
             "completed_with_unavailable_stages"
-            if _has_unavailable_stages(
-                manifest.get("stage_status", {}), months,
-                manifest.get("evaluation_status", {}), {"failures": failures},
-            ) else "completed"
+            if _has_operational_gaps(manifest.get("stage_status", {}), months, failures)
+            else "completed"
         )
         _append_monitor_event(event_path, "run_completed", "SimulationRunner",
                               status=manifest["status"])
@@ -947,10 +1004,8 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         elif manifest["status"] != "failed":
             manifest["status"] = (
                 "completed_with_unavailable_stages"
-                if _has_unavailable_stages(
-                    manifest.get("stage_status", {}), months,
-                    manifest.get("evaluation_status", {}), {"failures": failures},
-                ) else "completed"
+                if _has_operational_gaps(manifest.get("stage_status", {}), months, failures)
+                else "completed"
             )
         if heartbeat_task is not None:
             heartbeat_task.cancel()

@@ -62,6 +62,32 @@ class TestDashboardData(unittest.TestCase):
         self.assertIn("expected hotspot-history warm-up", recorder.warnings[0])
         self.assertIn("evaluation metrics unavailable for missing evidence", recorder.warnings[0])
 
+    def test_operational_completion_keeps_optional_unavailable_evidence_visible(self) -> None:
+        class Recorder:
+            def __init__(self):
+                self.successes = []
+                self.captions = []
+
+            def success(self, text):
+                self.successes.append(text)
+
+            def caption(self, text):
+                self.captions.append(text)
+
+        recorder = Recorder()
+        decisions = {
+            "unavailable_explanations": ({"expected": True, "reason": "warm-up"},),
+            "unavailable_stages": (),
+            "failures": (),
+            "unavailable_metrics": ({"status": "unavailable", "metric": "allocation_efficiency"},),
+        }
+        _status_callout(recorder, "completed", "run-operationally-complete", decisions)
+
+        self.assertEqual(len(recorder.successes), 1)
+        self.assertIn("required operational stages completed", recorder.successes[0])
+        self.assertEqual(len(recorder.captions), 1)
+        self.assertIn("listed separately below", recorder.captions[0])
+
     def test_live_coordination_model_preserves_logged_fields_and_unavailable_stages(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "run"

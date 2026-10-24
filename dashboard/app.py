@@ -1186,7 +1186,15 @@ def _status_callout(st: Any, status: str, run_id: Any,
         else:
             st.warning(message + " · some stages have unavailable evidence")
     elif status == "completed":
-        st.success(message)
+        st.success(message + " · required operational stages completed")
+        decisions = decisions or {}
+        if (decisions.get("unavailable_explanations")
+                or decisions.get("unavailable_stages")
+                or decisions.get("unavailable_metrics")):
+            st.caption(
+                "Expected warm-up and unavailable evidence are listed separately below; "
+                "they do not change operational completion."
+            )
     elif status in {"queued", "running"}:
         st.info(message + " · refreshing persisted run evidence")
     else:
