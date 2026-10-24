@@ -257,6 +257,11 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
 
             manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest["provenance"]["not_new_monthly_measurements"])
+            self.assertEqual(manifest["configuration"]["hotspot_rule"], {
+                "rule_id": "illustrative-persistent-risk-tier-v1",
+                "trigger_tiers": ["Poor", "Unsuitable", "Very Poor"],
+                "consecutive_months": 2,
+            })
             self.assertEqual(manifest["evaluation_status"]["allocation_efficiency"]["status"], "unavailable")
             self.assertNotIn("password", manifest["configuration"])
             self.assertTrue(all(event["event"] in {"started", "stopped"}

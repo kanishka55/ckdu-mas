@@ -12,9 +12,11 @@ from src.sim.simulation_lab import (
     SAMPLE_INPUT,
     ROOT,
     SimulationSettings,
+    build_runner_command,
     get_run_status,
     launch_simulation,
     list_lab_runs,
+    resolve_hotspot_configuration,
     validate_input_bytes,
 )
 
@@ -67,7 +69,43 @@ class SimulationLabTests(unittest.TestCase):
         self.assertEqual(config.end_month_index, 5)
         self.assertEqual(config.calendar_months, (11, 12))
         with self.assertRaisesRegex(ValueError, "Unknown cannot"):
-            _settings(hotspot_trigger_tiers=("Unknown",), hotspot_consecutive_months=1)
+            _settings(hotspot_trigger_tiers=("Unknown",), hotspot_consecutive_months=2)
+        with self.assertRaisesRegex(ValueError, "at least 2"):
+            _settings(hotspot_trigger_tiers=("Poor",), hotspot_consecutive_months=1)
+
+    def test_hotspot_checkbox_toggle_preserves_selection_but_disabled_state_passes_no_rule(self):
+        selected = ("Poor", "Unsuitable")
+        self.assertEqual(resolve_hotspot_configuration(True, selected, 2), (selected, 2))
+        # Session-state selections may remain after unchecking, but no rule reaches the runner.
+        self.assertEqual(resolve_hotspot_configuration(False, selected, 2), ((), None))
+        self.assertEqual(resolve_hotspot_configuration(True, selected, 2), (selected, 2))
+
+    def test_hotspot_configuration_requires_explicit_tiers_and_two_months(self):
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            resolve_hotspot_configuration(True, (), 2)
+        with self.assertRaisesRegex(ValueError, "at least 2"):
+            resolve_hotspot_configuration(True, ("Poor",), 1)
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            resolve_hotspot_configuration(True, ("Unknown",), 2)
+
+    def test_selected_hotspot_configuration_reaches_runner_cli_as_repeatable_flags(self):
+        tiers, window = resolve_hotspot_configuration(True, ("Poor", "Very Poor", "Unsuitable"), 2)
+        settings = _settings(hotspot_trigger_tiers=tiers, hotspot_consecutive_months=window)
+        command = build_runner_command(settings, input_path=SAMPLE_INPUT,
+                                       output_path=Path("/tmp/isolated-run"), run_id="hotspot-test")
+        self.assertEqual(command.count("--hotspot-trigger-tier"), 3)
+        self.assertEqual(command[command.index("--hotspot-trigger-tier") + 1], "Poor")
+        self.assertIn("Very Poor", command)
+        self.assertIn("Unsuitable", command)
+        self.assertEqual(command[command.index("--hotspot-consecutive-months") + 1], "2")
+
+    def test_disabled_hotspot_configuration_adds_no_runner_rule_arguments(self):
+        tiers, window = resolve_hotspot_configuration(False, ("Poor",), 2)
+        settings = _settings(hotspot_trigger_tiers=tiers, hotspot_consecutive_months=window)
+        command = build_runner_command(settings, input_path=SAMPLE_INPUT,
+                                       output_path=Path("/tmp/isolated-run"), run_id="no-hotspot")
+        self.assertNotIn("--hotspot-trigger-tier", command)
+        self.assertNotIn("--hotspot-consecutive-months", command)
 
     def test_upload_launch_uses_selected_file_and_fresh_isolated_run_path(self):
         with tempfile.TemporaryDirectory() as temp:

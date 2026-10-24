@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from src.core import ontology, wells
+from src.core.hotspot_screening import KNOWN_TIERS
 
 ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_INPUT = ROOT / "data/processed/synthetic_wells.csv"
@@ -29,6 +30,37 @@ INPUT_COLUMNS = tuple(column for column in wells.READING_COLUMNS if column != "m
 _PROCESSES: dict[str, subprocess.Popen[Any]] = {}
 _PROCESS_LOG_HANDLES: dict[str, Any] = {}
 _PROCESS_LOCK = threading.Lock()
+HOTSPOT_TRIGGER_TIERS = tuple(sorted(KNOWN_TIERS - {"Unknown"}))
+
+
+def resolve_hotspot_configuration(
+    enabled: bool,
+    trigger_tiers: tuple[str, ...] | list[str],
+    consecutive_months: int,
+) -> tuple[tuple[str, ...], int | None]:
+    """Validate the optional UI selection and return runner settings.
+
+    Disabled configuration always resolves to no rule, even if previous widget values
+    remain in Streamlit session state. Enabled configuration requires user selections.
+    """
+    if not isinstance(enabled, bool):
+        raise ValueError("hotspot configuration checkbox must be true or false")
+    if not enabled:
+        return (), None
+    if not isinstance(trigger_tiers, (tuple, list)):
+        raise ValueError("select at least one valid hotspot trigger tier")
+    if any(not isinstance(tier, str) for tier in trigger_tiers):
+        raise ValueError("select only valid hotspot trigger tiers")
+    selected = tuple(dict.fromkeys(trigger_tiers))
+    if not selected:
+        raise ValueError("select at least one hotspot trigger tier")
+    invalid = set(selected) - set(HOTSPOT_TRIGGER_TIERS)
+    if invalid:
+        raise ValueError(f"unsupported hotspot trigger tier(s): {sorted(invalid)}")
+    if (isinstance(consecutive_months, bool) or not isinstance(consecutive_months, int)
+            or consecutive_months < 2):
+        raise ValueError("hotspot screening requires at least 2 consecutive month_index records")
+    return selected, consecutive_months
 
 
 @dataclass(frozen=True)
@@ -83,9 +115,9 @@ class SimulationSettings:
         if self.hotspot_consecutive_months is not None and (
             isinstance(self.hotspot_consecutive_months, bool)
             or not isinstance(self.hotspot_consecutive_months, int)
-            or self.hotspot_consecutive_months < 1
+            or self.hotspot_consecutive_months < 2
         ):
-            raise ValueError("hotspot_consecutive_months must be a positive integer")
+            raise ValueError("hotspot_consecutive_months must be at least 2")
         if "Unknown" in self.hotspot_trigger_tiers:
             raise ValueError("Unknown cannot be configured as a triggering hotspot tier")
         supported_tiers = {"Excellent", "Good", "Poor", "Very Poor", "Unsuitable"}

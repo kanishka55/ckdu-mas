@@ -28,6 +28,7 @@ from src.sim.evaluate import (
 )
 from src.sim.agent_monitor import AgentMonitorSnapshot, load_agent_monitor
 from src.sim.simulation_lab import (
+    HOTSPOT_TRIGGER_TIERS,
     SAMPLE_INPUT,
     SimulationSettings,
     default_lab_root,
@@ -35,6 +36,7 @@ from src.sim.simulation_lab import (
     launch_simulation,
     list_lab_runs,
     read_process_log_tail,
+    resolve_hotspot_configuration,
     validate_input_bytes,
     validate_input_path,
 )
@@ -48,7 +50,6 @@ from src.sim.run_details import (
     load_simulation_run_details,
 )
 from src.core.ontology import RESOURCES
-from src.core.hotspot_screening import KNOWN_TIERS
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -1151,12 +1152,30 @@ def _render_monthly_details(st: Any, details: SimulationRunDetails) -> None:
                 st.info(f"Round results: {details.rounds.status}; no round artifact for month_index {index}.")
 
 
-def _status_callout(st: Any, status: str, run_id: Any) -> None:
+def _status_callout(st: Any, status: str, run_id: Any,
+                   decisions: Mapping[str, Any] | None = None) -> None:
     message = f"Run {run_id} · {_display_run_status(status)}"
     if status == "failed":
         st.error(message)
     elif status == "completed_with_unavailable_stages":
-        st.warning(message + " · some stages have unavailable evidence")
+        decisions = decisions or {}
+        explanations = decisions.get("unavailable_explanations", ())
+        metrics = decisions.get("unavailable_metrics", ())
+        expected_warmup_only = bool(explanations) and all(
+            item.get("expected") is True for item in explanations
+        ) and not decisions.get("unavailable_stages") and not decisions.get("failures")
+        unavailable_metrics_only = (
+            decisions.get("evaluation_status") in {"unavailable", "empty", "incomplete"}
+            and bool(metrics)
+            and all(item.get("status") == "unavailable" for item in metrics)
+        )
+        if expected_warmup_only and unavailable_metrics_only:
+            st.warning(
+                message + " · remaining gaps are expected hotspot-history warm-up and "
+                "evaluation metrics unavailable for missing evidence; see the reasons below"
+            )
+        else:
+            st.warning(message + " · some stages have unavailable evidence")
     elif status == "completed":
         st.success(message)
     elif status in {"queued", "running"}:
@@ -1307,7 +1326,7 @@ def _render_run_detail_page(st: Any, details: SimulationRunDetails, lab_root: Pa
     view = build_execution_view(details, run_status=str(status))
     st.title("Simulation Lab · Agent execution")
     st.caption("Synthetic illustrative run · reduced-parameter WQI · provisional screening")
-    _status_callout(st, str(status), run_id)
+    _status_callout(st, str(status), run_id, view["decisions"])
     progress_cols = st.columns([3, 1])
     if view["progress"] is not None:
         progress_cols[0].progress(view["progress"], text=(
@@ -1639,6 +1658,33 @@ def _render_simulation_lab(st: Any, lab_root: Path) -> None:
         st.caption("Preview: exact existing seasonal input schema; additional or missing columns are rejected.")
         st.dataframe(list(preview_rows), use_container_width=True)
 
+    st.markdown("#### Provisional hotspot screening")
+    with st.expander("Configure an optional tier-persistence screen"):
+        st.caption("This project-defined rule is provisional, not validated epidemiology. No tiers are preselected.")
+        enable_hotspot = st.checkbox(
+            "Configure a provisional tier-persistence screen",
+            value=False,
+            key="simulation_lab_hotspot_enabled",
+        )
+        trigger_tiers = st.multiselect(
+            "Trigger tiers (Unknown is excluded)",
+            options=HOTSPOT_TRIGGER_TIERS,
+            default=(),
+            disabled=not enable_hotspot,
+            key="simulation_lab_hotspot_trigger_tiers",
+        )
+        consecutive_months = st.number_input(
+            "Required consecutive month_index records",
+            min_value=2,
+            max_value=24,
+            value=2,
+            step=1,
+            disabled=not enable_hotspot,
+            key="simulation_lab_hotspot_consecutive_months",
+        )
+        if enable_hotspot:
+            st.warning("Select at least one tier. The selected tier set and persistence window are provisional user configuration, not a validated medical or epidemiological rule.")
+
     st.markdown("#### Run configuration")
     with st.form("simulation_lab_run_form"):
         left, middle, right = st.columns(3)
@@ -1661,7 +1707,7 @@ def _render_simulation_lab(st: Any, lab_root: Path) -> None:
                                                             value=2.0, step=0.5)
         stage_timeout = timeout_cols[2].number_input("Stage timeout (s)", min_value=0.1,
                                                      value=30.0, step=1.0)
-        with st.expander("Additional timeouts and provisional hotspot screening"):
+        with st.expander("Additional timeouts"):
             extra_cols = st.columns(4)
             hotspot_timeout = extra_cols[0].number_input("Hotspot stage timeout (s)", min_value=0.1,
                                                          value=5.0, step=0.5)
@@ -1671,18 +1717,6 @@ def _render_simulation_lab(st: Any, lab_root: Path) -> None:
                                                       value=5.0, step=0.5)
             ack_timeout = extra_cols[3].number_input("Inbox acknowledgement timeout (s)", min_value=0.1,
                                                      value=2.0, step=0.5)
-            st.caption("Hotspot screening is optional and project-defined, not validated epidemiology. Leaving it off keeps screening and dependent alerts unavailable where no configured rule exists.")
-            enable_hotspot = st.checkbox("Configure a provisional tier-persistence screen", value=False)
-            trigger_tiers = st.multiselect(
-                "Trigger tiers (Unknown is excluded)",
-                options=tuple(sorted(KNOWN_TIERS - {"Unknown"})), default=(),
-                disabled=not enable_hotspot,
-            )
-            consecutive_months = st.number_input("Required consecutive month_index records",
-                                                 min_value=1, max_value=24, value=2, step=1,
-                                                 disabled=not enable_hotspot)
-            if enable_hotspot:
-                st.warning("The selected tier set and persistence window are provisional user configuration, not a validated medical or epidemiological rule.")
         active_runs = [row for row in list_lab_runs(lab_root)
                        if row.get("status") in {"queued", "running"}]
         submitted = st.form_submit_button("Run Simulation", disabled=bool(active_runs))
@@ -1694,6 +1728,9 @@ def _render_simulation_lab(st: Any, lab_root: Path) -> None:
             st.error("Select a valid synthetic input before starting the runner.")
         else:
             try:
+                hotspot_tiers, hotspot_months = resolve_hotspot_configuration(
+                    enable_hotspot, trigger_tiers, int(consecutive_months),
+                )
                 settings = SimulationSettings(
                     start_month_index=int(start_index), month_count=int(month_count),
                     first_calendar_month=int(first_month), resource=resource,
@@ -1704,8 +1741,8 @@ def _render_simulation_lab(st: Any, lab_root: Path) -> None:
                     alert_receive_timeout_s=float(alert_receive_timeout),
                     alert_stage_timeout_s=float(alert_timeout),
                     alert_acknowledgement_timeout_s=float(ack_timeout),
-                    hotspot_trigger_tiers=tuple(trigger_tiers) if enable_hotspot else (),
-                    hotspot_consecutive_months=int(consecutive_months) if enable_hotspot else None,
+                    hotspot_trigger_tiers=hotspot_tiers,
+                    hotspot_consecutive_months=hotspot_months,
                 )
                 launched = launch_simulation(
                     lab_root, settings, input_path=selected_input if uploaded_bytes is None else None,
