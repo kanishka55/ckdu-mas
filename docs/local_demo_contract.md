@@ -248,12 +248,14 @@ decisions are represented only in `alerts.csv`. The dashboard's generated-demo v
 approximate division-town coordinates from the copied `division_points.csv` artifact rather than
 loading team-output paths.
 
-The configurable default hotspot rule (`Poor`, `Very Poor`, or `Unsuitable` for two consecutive
-`month_index` records; CLI flags `--hotspot-trigger-tiers` and
-`--hotspot-consecutive-months`) is an explicit project-defined demo screening rule, not a validated
-epidemiological model. Alert delivery still follows the current AlertAgent policy: unsupported tiers
-including `Very Poor`, `Unsuitable`, and `Unknown` remain unavailable. The allocation engine is a
-local illustrative Contract Net-style ranking adapter, not the original Member C implementation.
+There is no hotspot rule enabled by default. An explicitly configured illustrative example may use
+`Poor`, `Very Poor`, or `Unsuitable` for two consecutive `month_index` records, supplied with the
+repeatable `--hotspot-trigger-tier` option and `--hotspot-consecutive-months`. These are project
+screening parameters, not scientific thresholds or a validated epidemiological model; the runner
+records the chosen rule in the manifest. Alert delivery still follows the current AlertAgent policy:
+unsupported tiers including `Very Poor`, `Unsuitable`, and `Unknown` remain unavailable. The
+allocation engine is a local illustrative Contract Net-style ranking adapter, not the original
+Member C implementation.
 Its allocations are not fed into evaluator team-allocation inputs, so allocation comparisons remain
 unavailable. Alert latency remains unavailable without a documented risk-receipt/alert correlation.
 The manifest records the runner timestamp; data processing and deterministic allocation decisions
