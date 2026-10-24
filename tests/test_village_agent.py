@@ -137,6 +137,42 @@ class VillageCfpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("invalid", body["reason"])
                 self.receive.assert_not_awaited()
 
+    def test_ranking_uses_wqi_times_population_and_ignores_depot_distance(self) -> None:
+        from src.core import bidding, contract_net
+
+        villages = {}
+        for name, risk, population, distance in (
+            ("Remote high-need", 150.0, 200, 190.0),
+            ("Near lower-need", 110.0, 200, 5.0),
+            ("Tie B", 100.0, 100, 3.0),
+            ("Tie A", 100.0, 100, 220.0),
+        ):
+            agent = object.__new__(village.VillageAgent)
+            agent.ds_division = name
+            agent.population = population
+            agent.distance_to_depot_km = distance
+            agent.set_risk(risk, "Poor", month_index=4)
+            villages[name] = agent
+
+        raw_bids = {name: agent.raw_bid() for name, agent in villages.items()}
+        normalized = bidding.normalise_bids(raw_bids)
+        ranked = bidding.rank_bids(normalized)
+
+        self.assertEqual(raw_bids["Remote high-need"], 30000.0)
+        self.assertEqual(ranked[0][0], "Remote high-need")
+        self.assertEqual(ranked[1][0], "Near lower-need")
+        self.assertEqual([name for name, _ in ranked[2:]], ["Tie A", "Tie B"])
+        self.assertEqual(normalized["Remote high-need"], 1.0)
+        self.assertEqual(normalized["Near lower-need"], 22000.0 / 30000.0)
+        proposals = {
+            name: {"bid": agent.raw_bid()}
+            for name, agent in villages.items()
+        }
+        self.assertEqual(
+            [name for name, _ in contract_net.select_awardees(proposals, 4)],
+            ["Remote high-need", "Near lower-need", "Tie A", "Tie B"],
+        )
+
     async def test_demo_risk_configuration_produces_a_proposal_and_award_candidate(self) -> None:
         from src.sim import demo_contract_net
 

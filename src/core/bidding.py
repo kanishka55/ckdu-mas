@@ -12,8 +12,8 @@ Design decisions (record every change to this function here, with the reason):
   deterministic and reproducible.
 - 2026-10-17: distance to the depot removed from the bid. Dividing by distance made the most remote
   at-risk villages bid lowest (A+B test run: Padaviya, tier Poor, 68 km, bid 33,924 below Kandy,
-  tier Good). Distance is a delivery cost, not a need, so the ResourceCoordinator applies it
-  (bowser trips) using ``distance_to_depot_km`` from ckdu_03.
+  tier Good). Distance is retained as village metadata, but the current coordinator does not use it
+  for ranking and no bowser delivery-cost formula is implemented.
 - 2026-10-17: ``has_need`` gates bidding on the risk tier. Once risk became the village WQI (never 0),
   every village always bid and "no need" refusals never happened. A village now bids only when its
   tier is Poor, Very Poor or Unsuitable. The boundary (WQI 100) is the published Cooray et al. class

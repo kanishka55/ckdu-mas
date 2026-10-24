@@ -225,16 +225,19 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertTrue(any(item["status"] == "emitted"
                                 and item["delivery_status"] == "confirmed"
                                 for item in month_one_alerts))
+            confirmed_rounds = 0
             for index in (0, 1):
                 round_result = json.loads(
                     (output / "rounds" / f"month_index_{index:04d}_round_1.json")
                     .read_text(encoding="utf-8")
                 )
                 self.assertEqual(round_result["month_index"], index)
-                self.assertIn(round_result["award_status"], {
-                    "confirmed", "partially_confirmed", "unconfirmed", "failed",
-                    "send_failed", "no_award", "protocol_error",
-                })
+                if (round_result["award_status"] == "confirmed"
+                        and round_result["allocation_successful"]
+                        and round_result["confirmed_awardees"]):
+                    confirmed_rounds += 1
+            self.assertGreater(confirmed_rounds, 0,
+                               "successful integration scenario must confirm a resource award")
 
             with (output / "logs/messages.csv").open(newline="", encoding="utf-8") as stream:
                 reader = csv.DictReader(stream)
@@ -254,6 +257,63 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
                                 and row["direction"] == "sent"
                                 and json.loads(row["payload"]).get("type") == "hotspot_result"
                                 for row in rows))
+
+            emitted = [item for item in alert_decisions if item["status"] == "emitted"]
+            self.assertTrue(emitted, "successful scenario should emit at least one alert")
+            self.assertTrue(all(item["delivery_status"] == "confirmed"
+                                and item.get("alert_thread_id") for item in emitted))
+
+            def typed_rows(message_type, direction):
+                matches = []
+                for row in rows:
+                    if row["performative"] != ontology.INFORM or row["direction"] != direction:
+                        continue
+                    body = ontology.decode(row["performative"], row["payload"])
+                    if body["type"] == message_type:
+                        matches.append((row, body))
+                return matches
+
+            emitted_keys = [
+                (item["alert_thread_id"], item["ds_division"], item["month_index"])
+                for item in emitted
+            ]
+            self.assertEqual(len(emitted_keys), len(set(emitted_keys)),
+                             "each emitted alert must have a distinct correlation key")
+            sent_alerts = typed_rows("alert", "sent")
+            self.assertCountEqual(
+                [(row["thread_id"], body["ds_division"], body["month_index"])
+                 for row, body in sent_alerts],
+                emitted_keys,
+            )
+            sent_acknowledgements = typed_rows("alert_ack", "sent")
+            received_acknowledgements = typed_rows("alert_ack", "received")
+            self.assertCountEqual(
+                [(row["thread_id"], body["ds_division"], body["month_index"])
+                 for row, body in sent_acknowledgements],
+                emitted_keys,
+            )
+            self.assertCountEqual(
+                [(row["thread_id"], body["ds_division"], body["month_index"])
+                 for row, body in received_acknowledgements],
+                emitted_keys,
+            )
+            alert_endpoints = {
+                (row["thread_id"], row["sender"], row["receiver"])
+                for row, _body in sent_alerts
+            }
+            self.assertTrue(alert_endpoints)
+            self.assertTrue(all(
+                any(row["thread_id"] == thread and row["sender"] == alert_receiver
+                    and row["receiver"] == alert_sender
+                    for row, _body in sent_acknowledgements)
+                for thread, alert_sender, alert_receiver in alert_endpoints
+            ), "simulated inbox acknowledgements must return to the alert processor")
+            self.assertTrue(all(
+                any(row["thread_id"] == thread and row["sender"] == alert_receiver
+                    and row["receiver"] == alert_sender
+                    for row, _body in received_acknowledgements)
+                for thread, alert_sender, alert_receiver in alert_endpoints
+            ), "the alert processor must receive the acknowledgement from the simulated inbox")
 
             manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest["provenance"]["not_new_monthly_measurements"])

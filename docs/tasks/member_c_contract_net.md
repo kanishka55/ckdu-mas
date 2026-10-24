@@ -92,6 +92,10 @@ about **50%** used RO-treated water. Use that to justify RO units as the contest
 argue your pool size, rather than picking a number out of the air. Put the justification in
 `src/sim/config.py` as a comment **and** in your report section.
 
+The following resource differences are design targets from the original task specification, not a
+claim about the current coordinator. The current coordinator ranks `risk × population` bids for its
+configured resource and has no distance-based delivery-cost calculation.
+
 Model the two resources differently — that is where the interesting negotiation lives:
 
 | Resource | Character |
@@ -99,11 +103,12 @@ Model the two resources differently — that is where the interesting negotiatio
 | **RO unit** | Durable, high value, serves a village for many months once placed. Allocate few, rarely. |
 | **Water bowser** | Recurring monthly trips, cost scales with `distance_to_depot_km`. Allocate several, every month. |
 
-**Distance is your job now.** Since 2026-10-17 the village bid no longer divides by distance
-(that made remote at-risk villages bid lowest). Read `distance_to_depot_km` from
-`load_data.load_ds_divisions()` (straight-line km to the Anuradhapura depot, a modelling assumption,
-see `docs/data_assumptions.md`) and apply it as the bowser trip cost in the coordinator. Write down
-how you use it, and do not let it silently cancel out need.
+**Current implementation status:** since 2026-10-17 the village bid no longer divides by distance
+(that made remote at-risk villages bid lowest). The current `VillageAgent` retains
+`distance_to_depot_km` as metadata, but neither village bids nor `ResourceCoordinatorAgent`
+ranking use it; no bowser trip-cost calculation is implemented. This older task's request to apply
+distance as a bowser cost remains unimplemented and does not define an agreed cost formula. Do not
+assume distance affects current allocation results or introduce a formula without team agreement.
 
 ## 4. Tasks
 
