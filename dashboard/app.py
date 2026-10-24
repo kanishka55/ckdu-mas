@@ -648,7 +648,7 @@ def _render_agent_monitor_snapshot(st: Any, snapshot: AgentMonitorSnapshot) -> N
     st.caption(f"Run: {snapshot.run_id} · {snapshot.run_dir}")
     st.caption(f"Source: explicitly selected SPADE simulation run · {snapshot.freshness} · run status: {snapshot.run_status}")
     if snapshot.freshness == "live":
-        st.success("Run activity is fresh from the runner event journal or directional message log.")
+        st.success("The runner heartbeat is fresh. Each agent's state is derived separately from its own events.")
     elif snapshot.freshness == "stale":
         st.warning("Run manifest still says running, but no recent heartbeat or message evidence exists. Agent activity is stale/unknown.")
     elif snapshot.freshness == "failed snapshot":
@@ -658,7 +658,7 @@ def _render_agent_monitor_snapshot(st: Any, snapshot: AgentMonitorSnapshot) -> N
     else:
         st.warning("Run freshness is unknown; no active state is inferred.")
     st.caption(f"Last observed run activity: {snapshot.last_activity or 'Unavailable'}")
-    st.caption("A started SPADE lifecycle event plus a fresh runner heartbeat indicates a running process; this does not health-check each behaviour or prove external XMPP availability.")
+    st.caption("An agent is running or waiting only with a recent heartbeat from that agent identity. Heartbeats show event-loop liveness, not domain correctness or external XMPP health.")
 
     st.markdown("#### Observed agents")
     if snapshot.agents:

@@ -120,4 +120,4 @@ class RiskScoringAgent(Agent):
                     await common.send(self, to, ontology.INFORM, detail["well_risk"], msg.thread)
 
     async def setup(self):
-        self.add_behaviour(self.ScoreReadings())
+        common.add_observed_behaviour(self, self.ScoreReadings())

@@ -150,7 +150,7 @@ class AlertProcessingAgent(Agent):
             async def run(inner):
                 await common.send(inner, self.recipient_jid, ontology.INFORM, payload, thread)
         behaviour = Send()
-        self.add_behaviour(behaviour)
+        common.add_observed_behaviour(self, behaviour)
         await behaviour.join()
 
     def accept_ack(self, body: dict[str, Any], sender: str, thread: str | None) -> bool:
@@ -211,7 +211,7 @@ class AlertProcessingAgent(Agent):
                 agent.accept_ack(body, str(msg.sender), msg.thread)
 
     async def setup(self):
-        self.add_behaviour(self.Receive())
+        common.add_observed_behaviour(self, self.Receive())
 
 
 class AlertInboxAgent(Agent):
@@ -243,4 +243,4 @@ class AlertInboxAgent(Agent):
             await common.send(self, agent.allowed_sender, ontology.INFORM, ack, msg.thread)
 
     async def setup(self):
-        self.add_behaviour(self.Receive())
+        common.add_observed_behaviour(self, self.Receive())

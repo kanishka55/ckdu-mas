@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.core import msg_log, ontology
+from src.sim.event_journal import append_event, register_run
 from src.sim.agent_monitor import (
     derive_agent_states,
     load_agent_monitor,
@@ -56,26 +57,35 @@ class AgentMonitorParsingTests(unittest.TestCase):
         timestamp = "2026-01-01T00:00:00+00:00"
         observed_at = datetime.fromisoformat(timestamp)
         events = ({"event_type": "agent_started", "timestamp": timestamp,
-                   "component": "RiskScoringAgent", "identity": "risk@localhost"},)
+                   "event_seq": 1, "component": "RiskScoringAgent", "identity": "risk@localhost"},
+                  {"event_type": "agent_heartbeat", "timestamp": timestamp,
+                   "event_seq": 2, "component": "RiskScoringAgent", "identity": "risk@localhost"})
         rows = derive_agent_states(events, (), run_status="running", run_fresh=True,
                                    now=observed_at)
-        self.assertEqual(rows[0]["Status"], "running (start observed)")
+        self.assertEqual(rows[0]["Status"], "running")
         with_round = derive_agent_states(
-            (*events, {"event_type": "agent_stopped", "timestamp": timestamp,
-                       "component": "RiskScoringAgent", "identity": "risk@localhost"},
+            (*events, {"event_type": "agent_work_completed", "timestamp": timestamp,
+                       "event_seq": 3, "component": "RiskScoringAgent", "identity": "risk@localhost",
+                       "outcome": "completed_with_unavailable_stages"},
+             {"event_type": "agent_stopped", "timestamp": timestamp,
+                       "event_seq": 4, "component": "RiskScoringAgent", "identity": "risk@localhost"},
              {"event_type": "round_completed", "timestamp": timestamp,
               "component": "ResourceCoordinatorAgent", "identity": "risk@localhost"}),
-            (), run_status="completed", run_fresh=False, now=observed_at,
+            (), run_status="completed_with_unavailable_stages", run_fresh=False, now=observed_at,
         )
         self.assertEqual(with_round[0]["Status"], "completed")
-        stale = derive_agent_states(events, (), run_status="running", run_fresh=False)
+        stale_events = (*events[:-1], {**events[-1], "timestamp": "2025-12-31T23:59:00+00:00"})
+        stale = derive_agent_states(stale_events, (), run_status="running", run_fresh=False,
+                                    now=observed_at)
         self.assertEqual(stale[0]["Status"], "stale")
         stopped = derive_agent_states((*events, {"event_type": "agent_stopped",
                                                 "timestamp": timestamp,
+                                                "event_seq": 3,
                                                 "component": "RiskScoringAgent",
                                                 "identity": "risk@localhost"}), (),
                                       run_status="completed", run_fresh=False)
-        self.assertEqual(stopped[0]["Status"], "completed")
+        self.assertEqual(stopped[0]["Status"], "unknown")
+        self.assertIn("work completion was not recorded", stopped[0]["Status evidence"])
         failed = derive_agent_states(
             ({"event_type": "agent_start_failed", "timestamp": timestamp,
               "component": "RiskScoringAgent", "identity": "risk@localhost"},),
@@ -90,6 +100,90 @@ class AgentMonitorParsingTests(unittest.TestCase):
                                    configured_agents=({"component": "ClockAgent",
                                                        "identity": "clock@localhost"},))
         self.assertEqual(rows[0]["Status"], "unknown")
+
+    def test_starting_requires_recent_request_without_start_confirmation(self):
+        now = datetime.now(timezone.utc)
+        rows = derive_agent_states(
+            ({"event_type": "agent_starting", "timestamp": now.isoformat(),
+              "event_seq": 1, "component": "ClockAgent", "identity": "clock@localhost"},), (),
+            run_status="running", run_fresh=True, now=now,
+        )
+        self.assertEqual(rows[0]["Status"], "starting")
+
+    def test_startup_failure_behavior_failure_and_run_failure_are_separate(self):
+        now = datetime.now(timezone.utc)
+        base = {"timestamp": now.isoformat(), "component": "VillageAgent",
+                "identity": "village@localhost"}
+        start_failure = derive_agent_states(
+            ({**base, "event_type": "agent_start_failed"},), (),
+            run_status="failed", run_fresh=False, now=now,
+        )
+        self.assertEqual(start_failure[0]["Status"], "failed")
+        behavior_failure = derive_agent_states(
+            ({**base, "event_type": "agent_started", "event_seq": 1},
+             {**base, "event_type": "agent_heartbeat", "event_seq": 2},
+             {**base, "event_type": "agent_behavior_failed", "event_seq": 3,
+              "reason": "ValueError: fixture failure"},
+             {**base, "event_type": "agent_stopped", "event_seq": 4}), (),
+            run_status="failed", run_fresh=False, now=now,
+        )
+        self.assertEqual(behavior_failure[0]["Status"], "failed")
+        clean_shutdown_after_run_failure = derive_agent_states(
+            ({**base, "event_type": "agent_started", "event_seq": 1},
+             {**base, "event_type": "agent_stopped", "event_seq": 2}), (),
+            run_status="failed", run_fresh=False, now=now,
+        )
+        self.assertEqual(clean_shutdown_after_run_failure[0]["Status"], "unknown")
+
+    def test_agent_heartbeat_is_required_and_waiting_requires_current_phase_evidence(self):
+        now = datetime.now(timezone.utc)
+        base = {"timestamp": now.isoformat(), "component": "Coordinator",
+                "identity": "coordinator@localhost"}
+        no_heartbeat = derive_agent_states(
+            ({**base, "event_type": "agent_started", "event_seq": 1},), (),
+            run_status="running", run_fresh=True, now=now,
+        )
+        self.assertEqual(no_heartbeat[0]["Status"], "unknown")
+        waiting = derive_agent_states(
+            ({**base, "event_type": "agent_started", "event_seq": 1},
+             {**base, "event_type": "agent_heartbeat", "event_seq": 2},
+             {**base, "event_type": "agent_waiting", "event_seq": 3,
+              "phase": "waiting_for_proposals", "thread_id": "round-1"}), (),
+            run_status="running", run_fresh=True, now=now,
+        )
+        self.assertEqual(waiting[0]["Status"], "waiting")
+        self.assertEqual(waiting[0]["Status evidence"], "waiting_for_proposals")
+
+    def test_event_journal_new_schema_is_sequenced_and_backward_compatible(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "agent_events.jsonl"
+            first = append_event(path, "agent_started", "RiskScoringAgent",
+                                 identity="risk@localhost", run_id="new-schema",
+                                 month_index=0, phase="scoring")
+            second = append_event(path, "agent_heartbeat", "RiskScoringAgent",
+                                  identity="risk@localhost", run_id="new-schema")
+            self.assertEqual(first["event_seq"], 1)
+            self.assertEqual(second["event_seq"], 2)
+            self.assertEqual(first["run_id"], "new-schema")
+            parsed, status, errors = read_event_journal(path)
+            self.assertEqual(status, "available")
+            self.assertEqual(errors, ())
+            self.assertEqual(parsed[0]["month_index"], 0)
+
+            path.write_text("", encoding="utf-8")
+            register_run(path, "new-run")
+            fresh_run_event = append_event(path, "run_started", "SimulationRunner")
+            self.assertEqual(fresh_run_event["event_seq"], 1)
+            self.assertEqual(fresh_run_event["run_id"], "new-run")
+
+            # Legacy journals remain readable; missing agent evidence stays unknown.
+            path.write_text(json.dumps({"event_type": "agent_stopped", "timestamp": first["timestamp"],
+                                       "component": "RiskScoringAgent", "identity": "risk@localhost"}) + "\n",
+                            encoding="utf-8")
+            legacy, legacy_status, _ = read_event_journal(path)
+            self.assertEqual(legacy_status, "available")
+            state = derive_agent_states(legacy, (), run_status="completed", run_fresh=False)
+            self.assertEqual(state[0]["Status"], "unknown")
 
     def test_direction_counts_do_not_double_count_sent_received_copies(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -121,15 +215,29 @@ class AgentMonitorParsingTests(unittest.TestCase):
             manifest = {"run_id": "test-run", "status": "running", "agent_lifecycle": []}
             (root / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             event_path = root / "agent_events.jsonl"
-            event_path.write_text(json.dumps({"event_type": "heartbeat", "timestamp": now.isoformat(),
+            event_path.write_text(json.dumps({"event_type": "runner_heartbeat", "timestamp": now.isoformat(),
                                               "component": "SimulationRunner"}) + "\n"
                                   + json.dumps({"event_type": "agent_started", "timestamp": now.isoformat(),
-                                                "component": "ClockAgent", "identity": "clock@localhost"}) + "\n",
+                                                "component": "ClockAgent", "identity": "clock@localhost",
+                                                "event_seq": 1}) + "\n"
+                                  + json.dumps({"event_type": "agent_heartbeat", "timestamp": now.isoformat(),
+                                                "component": "ClockAgent", "identity": "clock@localhost",
+                                                "event_seq": 2}) + "\n",
                                   encoding="utf-8")
             (root / "logs/messages.csv").write_text(",".join(msg_log.COLUMNS) + "\n", encoding="utf-8")
             live = load_agent_monitor(root, now=now)
             self.assertEqual(live.freshness, "live")
-            self.assertEqual(live.agents[0]["Status"], "running (start observed)")
+            self.assertEqual(live.agents[0]["Status"], "running")
+            event_path.write_text(json.dumps({"event_type": "agent_started", "timestamp": now.isoformat(),
+                                              "component": "ClockAgent", "identity": "clock@localhost",
+                                              "event_seq": 1}) + "\n"
+                                  + json.dumps({"event_type": "agent_heartbeat", "timestamp": now.isoformat(),
+                                                "component": "ClockAgent", "identity": "clock@localhost",
+                                                "event_seq": 2}) + "\n",
+                                  encoding="utf-8")
+            no_runner_heartbeat = load_agent_monitor(root, now=now)
+            self.assertEqual(no_runner_heartbeat.freshness, "stale")
+            self.assertEqual(no_runner_heartbeat.agents[0]["Status"], "running")
             stale = load_agent_monitor(root, now=now + timedelta(seconds=30))
             self.assertEqual(stale.freshness, "stale")
 

@@ -158,5 +158,5 @@ class VillageAgent(Agent):
         cfp_conversation = (_performative(ontology.CFP)
                             | _performative(ontology.ACCEPT_PROPOSAL)
                             | _performative(ontology.REJECT_PROPOSAL))
-        self.add_behaviour(self.RespondToCfp(), cfp_conversation)
-        self.add_behaviour(self.TrackRisk(), _performative(ontology.INFORM))
+        common.add_observed_behaviour(self, self.RespondToCfp(), cfp_conversation)
+        common.add_observed_behaviour(self, self.TrackRisk(), _performative(ontology.INFORM))

@@ -83,6 +83,21 @@ class ResourceCoordinatorAgent(Agent):
 
         def _transition(self, result: dict[str, Any], state: str) -> None:
             result["state_history"].append(state)
+            agent: ResourceCoordinatorAgent = self.agent
+            phase = {
+                agent.IDLE: "round_initialized",
+                agent.CFP_SENT: "sending_cfp",
+                agent.COLLECTING: "waiting_for_proposals",
+                agent.AWARDING: "selecting_awards",
+                agent.CONFIRMING: "waiting_for_confirmations",
+                agent.DONE: "round_behavior_finished",
+            }[state]
+            event_type = "agent_waiting" if state in {agent.COLLECTING, agent.CONFIRMING} else "agent_phase"
+            common.record_agent_event(
+                agent, event_type, phase=phase, state=state,
+                month_index=agent.config.month_index, round=agent.config.round_number,
+                thread_id=agent.thread_id,
+            )
 
         async def run(self):
             agent: ResourceCoordinatorAgent = self.agent
@@ -285,4 +300,4 @@ class ResourceCoordinatorAgent(Agent):
             | Template(metadata={"performative": ontology.REFUSE}) \
             | Template(metadata={"performative": ontology.INFORM}) \
             | Template(metadata={"performative": ontology.FAILURE})
-        self.add_behaviour(self.RunRound(), expected)
+        common.add_observed_behaviour(self, self.RunRound(), expected)

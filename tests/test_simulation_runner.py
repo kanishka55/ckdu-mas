@@ -9,10 +9,12 @@ import unittest
 from pathlib import Path
 
 from src.agents.clock import ClockAgent
+from src.agents import common
 from src.core import msg_log, ontology
 from src.core.hotspot_screening import ScreeningRule
 from src.sim.runner import SimulationConfig, run_simulation, validate_output_dir
 from src.sim.agent_monitor import load_agent_monitor
+from src.sim.agent_monitor import read_event_journal
 
 
 class SimulationRunnerConfigurationTests(unittest.TestCase):
@@ -43,6 +45,35 @@ class SimulationRunnerConfigurationTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 validate_output_dir(root)
             self.assertEqual((root / "keep.txt").read_text(encoding="utf-8"), "preserve")
+
+
+class BehaviorFailureJournalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_uncaught_behavior_failure_is_recorded_then_reraised(self):
+        with tempfile.TemporaryDirectory() as temp:
+            class FakeAgent:
+                jid = "agent@localhost"
+                event_journal_path = Path(temp) / "events.jsonl"
+                run_id = "failure-fixture"
+                monitor_component = "IllustrativeAgent"
+                monitor_behavior_failures = []
+
+                def add_behaviour(self, behavior, template=None):
+                    self.behavior = behavior
+
+            class FailingBehavior:
+                async def run(self):
+                    raise ValueError("illustrative behavior failure")
+
+            agent = FakeAgent()
+            common.add_observed_behaviour(agent, FailingBehavior())
+            with self.assertRaisesRegex(ValueError, "illustrative behavior failure"):
+                await agent.behavior.run()
+            events, status, errors = read_event_journal(agent.event_journal_path)
+            self.assertEqual(status, "available")
+            self.assertEqual(errors, ())
+            self.assertEqual(events[0]["event_type"], "agent_behavior_failed")
+            self.assertEqual(events[0]["run_id"], "failure-fixture")
+            self.assertEqual(len(agent.monitor_behavior_failures), 1)
 
 
 @unittest.skipUnless(os.environ.get("CKDU_RUN_SPADE_SIMULATION") == "1",
@@ -94,6 +125,22 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertTrue((output / "logs/risk_scores.csv").is_file())
             self.assertTrue((output / "logs/evaluation_summary.csv").is_file())
             self.assertTrue((output / "agent_events.jsonl").is_file())
+            event_rows = [json.loads(line) for line in
+                          (output / "agent_events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(all(row.get("run_id") == "test-run" for row in event_rows))
+            self.assertTrue(all(isinstance(row.get("event_seq"), int) for row in event_rows))
+            started_identities = {row.get("identity") for row in event_rows
+                                  if row.get("event_type") == "agent_started"}
+            heartbeat_identities = {row.get("identity") for row in event_rows
+                                    if row.get("event_type") == "agent_heartbeat"}
+            self.assertTrue(started_identities)
+            self.assertTrue(started_identities.issubset(heartbeat_identities))
+            self.assertTrue(any(row.get("event_type") == "agent_work_completed"
+                                for row in event_rows))
+            self.assertFalse(any(row.get("event_type") == "agent_behavior_failed"
+                                 for row in event_rows))
+            self.assertTrue(all(left["event_seq"] < right["event_seq"]
+                                for left, right in zip(event_rows, event_rows[1:])))
             self.assertEqual(len(list((output / "rounds").glob("*.json"))), 2)
             persisted_risks = json.loads((output / "risk_records.json").read_text(encoding="utf-8"))
             self.assertEqual(len(persisted_risks), len(result["divisions"]) * 2)

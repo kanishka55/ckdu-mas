@@ -25,8 +25,19 @@ non-empty target. Outputs include:
 - `run_manifest.json`: provenance, configuration, agent lifecycle events, month completion, round
   paths, message row counts, stage statuses, failures, and evidence-gated evaluator statuses.
 - `agent_events.jsonl`: append-only runner lifecycle, month/round/hotspot/alert events plus a
-  two-second runner heartbeat. It is separate from, and does not change, the seven-column message
-  CSV. Heartbeats establish runner-process freshness, not per-behaviour health.
+  two-second runner heartbeat and periodic per-agent SPADE behavior-loop heartbeats. Rows include
+  UTC `timestamp`, monotonic-in-run `event_seq`, `event_type`, `component`, `run_id`, and an
+  `identity` for agent-specific events; applicable events also include `month_index`, `round`,
+  `thread_id`, `phase`, `outcome`, or `reason`. `agent_starting` is emitted before `start()`;
+  `agent_started` only after it returns successfully. `agent_work_completed` records that the
+  runner finished that agent's assigned run work; its `outcome` can still indicate unavailable
+  stages. `agent_stopped` records process shutdown only and never proves successful work by itself.
+  Coordinator `agent_waiting` events identify proposal or confirmation collection phases. Uncaught
+  registered-behavior exceptions are recorded as `agent_behavior_failed` and re-raised. The journal
+  is separate from, and does not change, the seven-column message CSV. A per-agent heartbeat proves
+  that a heartbeat behavior ran in that SPADE agent's event loop recently; it does not prove that
+  domain calculations are correct, external XMPP is healthy, or a particular workflow stage
+  succeeded. Event ordering uses `event_seq`; readers continue to accept legacy rows without it.
 - `logs/messages.csv`: the shared seven-column typed directional message log, isolated to this run.
 - `logs/risk_scores.csv` and `logs/well_scores.csv`: outputs from the existing risk output writer.
 - `logs/evaluation_summary.csv`: existing evaluator output. Missing references, baselines, and event
@@ -61,10 +72,14 @@ for the two-month example, the first simulated month is unavailable during warm-
 event journal, final manifest, message log, round files, hotspot results, and alert outcomes; it does
 not infer a run from `logs/`, fixture files, or `CKDU_DEMO_OUTPUT_DIR`. While the manifest is running,
 freshness is based on recent journal/message evidence and the dashboard fragment refreshes every two
-seconds. Once `run_finished` is recorded, the same view is a persisted snapshot. A started lifecycle
-event plus fresh runner activity indicates a started agent process; it does not prove each behaviour
-is healthy or that an external XMPP service is reachable. Missing or stale evidence is shown as
-unknown/stale.
+seconds. Per-agent `running` and `waiting` require a recent heartbeat from that identity; `waiting`
+additionally requires an unresolved recorded workflow phase. `completed` requires explicit
+`agent_work_completed`; clean shutdown alone maps to unknown if work completion was not recorded.
+Behavior/start/stop failures map to failed. Once `run_finished` is recorded, the same view is a
+persisted snapshot. Heartbeats are liveness evidence only, not a behavior health check or proof that
+external XMPP is reachable. Missing or stale evidence is shown as unknown/stale. Older journals
+remain readable, but without per-agent heartbeat and work-completion events their agent states remain
+unknown rather than being inferred from message freshness.
 
 Example: two simulated months, with explicit calendar labels and a fresh output path:
 

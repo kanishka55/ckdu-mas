@@ -58,5 +58,5 @@ class ClockAgent(Agent):
             raise ValueError("month_index ticks must advance sequentially")
         body = self.tick_body(month_index, calendar_month)
         behaviour = self.PublishTick(body, f"month-tick-{month_index}")
-        self.add_behaviour(behaviour)
+        common.add_observed_behaviour(self, behaviour)
         await asyncio.wait_for(behaviour.join(), timeout=timeout_s)

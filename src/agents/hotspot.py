@@ -198,7 +198,7 @@ class HotspotAgent(Agent):
                 async def run(self):
                     await common.send(self, agent.result_recipient_jid, ontology.INFORM, body, thread)
             behaviour = Publish()
-            self.add_behaviour(behaviour)
+            common.add_observed_behaviour(self, behaviour)
             await behaviour.join()
             self.published_keys.add(key)
 
@@ -213,4 +213,4 @@ class HotspotAgent(Agent):
                 agent.process_risk_record(body, msg.thread)
 
     async def setup(self):
-        self.add_behaviour(self.ReceiveRiskRecords())
+        common.add_observed_behaviour(self, self.ReceiveRiskRecords())

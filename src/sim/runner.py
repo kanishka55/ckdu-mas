@@ -34,6 +34,7 @@ from src.agents.well_monitor import WellMonitorAgent
 from src.core import contract_net, msg_log, ontology, risk_tiers, wells, wqi
 from src.core.hotspot_screening import ScreeningRule
 from src.sim import load_data, risk_outputs
+from src.sim.event_journal import append_event, register_run
 from src.sim.evaluate import evaluate
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -155,7 +156,7 @@ class RiskRecordCollectorAgent(Agent):
                 agent.records.append(dict(body))
 
     async def setup(self):
-        self.add_behaviour(self.Collect())
+        common.add_observed_behaviour(self, self.Collect())
 
 
 def validate_output_dir(output_dir: str | Path) -> Path:
@@ -208,20 +209,14 @@ def _rewrite_owned_json(path: Path, value: Any) -> None:
 def _append_monitor_event(path: Path, event_type: str, component: str, *,
                           identity: str | None = None, **details: Any) -> None:
     """Append one observed runner/lifecycle event to the isolated run journal."""
-    row = {"timestamp": _utc_now(), "event_type": event_type, "component": component}
-    if identity is not None:
-        row["identity"] = identity
-    row.update(details)
-    with path.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
-        stream.flush()
+    append_event(path, event_type, component, identity=identity, **details)
 
 
 async def _monitor_heartbeat(path: Path) -> None:
     """Provide process-level freshness evidence while the runner event loop remains alive."""
     while True:
         await asyncio.sleep(2.0)
-        _append_monitor_event(path, "heartbeat", "SimulationRunner")
+        _append_monitor_event(path, "runner_heartbeat", "SimulationRunner")
 
 
 async def _wait_for_month(
@@ -307,6 +302,7 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
     with event_path.open("x", encoding="utf-8", newline="\n"):
         pass
     run_id = config.run_id
+    register_run(event_path, run_id)
     message_log_path = log_path
     started_agents: list[tuple[str, Agent]] = []
     lifecycle: list[dict[str, Any]] = []
@@ -460,6 +456,10 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             agent.message_log_path = message_log_path
 
         for name, agent in agents:
+            agent.event_journal_path = event_path
+            agent.run_id = run_id
+            agent.monitor_component = name
+            agent.monitor_behavior_failures = []
             _append_monitor_event(event_path, "agent_starting", name, identity=str(agent.jid))
             try:
                 await agent.start(auto_register=True)
@@ -468,9 +468,12 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                 raise
             started_agents.append((name, agent))
             record_lifecycle(name, "started", agent)
+            common.add_agent_heartbeat(agent)
 
         manifest["stage_status"]["risk_scoring"] = "running"
         for month_index in range(config.start_month_index, config.end_month_index + 1):
+            for _component, live_agent in agents:
+                live_agent.monitor_month_index = month_index
             calendar_month = config.calendar_month_by_index[month_index]
             month_status: dict[str, Any] = {
                 "month_index": month_index,
@@ -582,6 +585,10 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             coordinator = ResourceCoordinatorAgent(coordinator_jid, config.password, coordinator_config)
             coordinator.message_log_path = message_log_path
             name = f"ResourceCoordinatorAgent:month_index={month_index}:round={config.round_number}"
+            coordinator.event_journal_path = event_path
+            coordinator.run_id = run_id
+            coordinator.monitor_component = name
+            coordinator.monitor_behavior_failures = []
             _append_monitor_event(event_path, "agent_starting", name, identity=coordinator_jid)
             try:
                 await coordinator.start(auto_register=True)
@@ -596,12 +603,29 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                                   lifecycle_state="started")
             lifecycle.append({"component": name, "event": "started", "at": _utc_now(),
                               "jid": str(coordinator.jid)})
+            common.add_agent_heartbeat(coordinator)
             behaviour = next(iter(coordinator.behaviours))
             try:
                 await asyncio.wait_for(
                     behaviour.join(),
                     timeout=config.proposal_timeout_s + config.confirmation_timeout_s + 15.0,
                 )
+                round_outcome = coordinator.round_result
+                if round_outcome is None:
+                    _append_monitor_event(event_path, "agent_work_failed", name,
+                                          identity=str(coordinator.jid), month_index=month_index,
+                                          round=config.round_number, outcome="unavailable_no_round_result")
+                elif (coordinator.monitor_behavior_failures
+                      or round_outcome.get("award_status") == "protocol_error"):
+                    _append_monitor_event(event_path, "agent_work_failed", name,
+                                          identity=str(coordinator.jid), month_index=month_index,
+                                          round=config.round_number,
+                                          outcome=round_outcome.get("award_status"))
+                else:
+                    _append_monitor_event(event_path, "agent_work_completed", name,
+                                          identity=str(coordinator.jid), month_index=month_index,
+                                          round=config.round_number,
+                                          outcome=round_outcome.get("award_status"))
             finally:
                 try:
                     await coordinator.stop()
@@ -696,6 +720,17 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         raise
     finally:
         for name, agent in reversed(started_agents):
+            if manifest.get("status") != "failed":
+                failures_for_agent = getattr(agent, "monitor_behavior_failures", [])
+                event_type = "agent_work_failed" if failures_for_agent else "agent_work_completed"
+                _append_monitor_event(
+                    event_path, event_type, name, identity=str(agent.jid),
+                    outcome=("behavior_failed" if failures_for_agent
+                             else "completed_with_unavailable_stages"
+                             if manifest.get("status") == "completed_with_unavailable_stages"
+                             else "completed"),
+                    behavior_failures=failures_for_agent,
+                )
             try:
                 await agent.stop()
             except Exception as exc:

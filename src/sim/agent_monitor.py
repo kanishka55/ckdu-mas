@@ -178,35 +178,85 @@ def derive_agent_states(events: Sequence[Mapping[str, Any]], messages: Sequence[
     output = []
     observed_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     for identity, record in identities.items():
-        ordered = sorted(record["_events"], key=lambda row: _parse_time(row.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc))
-        latest = ordered[-1] if ordered else {}
-        event_type = latest.get("event_type")
+        ordered = sorted(
+            enumerate(record["_events"]),
+            key=lambda pair: (
+                pair[1].get("event_seq", 0) if isinstance(pair[1].get("event_seq"), int) else 0,
+                _parse_time(pair[1].get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+                pair[0],
+            ),
+        )
+        agent_events = [row for _, row in ordered]
+        latest = agent_events[-1] if agent_events else {}
+        start_event = next((row for row in agent_events
+                            if row.get("event_type") == "agent_started"), None)
+        starting_event = next((row for row in reversed(agent_events)
+                               if row.get("event_type") == "agent_starting"), None)
+        heartbeat_events = [row for row in agent_events
+                            if row.get("event_type") == "agent_heartbeat"]
+        last_heartbeat = max(
+            (_parse_time(row.get("timestamp")) for row in heartbeat_events if _parse_time(row.get("timestamp"))),
+            default=None,
+        )
+        failures = [row for row in agent_events if row.get("event_type") in {
+            "agent_start_failed", "agent_stop_failed", "agent_behavior_failed", "agent_work_failed",
+        }]
+        work_completed = [row for row in agent_events
+                          if row.get("event_type") == "agent_work_completed"]
+        stopped = next((row for row in reversed(agent_events)
+                        if row.get("event_type") == "agent_stopped"), None)
+        waiting_events = [row for row in agent_events if row.get("event_type") == "agent_waiting"]
+        phase_events = [row for row in agent_events if row.get("event_type") == "agent_phase"]
+        latest_waiting = waiting_events[-1] if waiting_events else None
+        latest_phase = phase_events[-1] if phase_events else None
+
         state = "unknown"
-        if event_type in {"agent_start_failed", "agent_stop_failed"}:
+        reason = "no lifecycle evidence"
+        if failures:
             state = "failed"
-        elif event_type == "agent_stopped":
+            reason = str(failures[-1].get("reason") or failures[-1].get("outcome") or "failure recorded")
+        elif work_completed:
             state = "completed"
-        elif event_type == "agent_starting":
-            if run_status == "running":
-                state = "starting" if run_fresh else "stale"
+            reason = str(work_completed[-1].get("outcome", "run work completion recorded"))
+        elif stopped:
+            state = "unknown"
+            reason = "agent stopped, but successful work completion was not recorded"
+        elif start_event is not None:
+            heartbeat_age = ((observed_now - last_heartbeat).total_seconds()
+                             if last_heartbeat is not None else None)
+            heartbeat_fresh = heartbeat_age is not None and heartbeat_age <= stale_after_s
+            waiting_is_current = (
+                latest_waiting is not None
+                and (latest_phase is None or
+                     (latest_waiting.get("event_seq", 0) if isinstance(latest_waiting.get("event_seq"), int) else 0)
+                     > (latest_phase.get("event_seq", 0) if isinstance(latest_phase.get("event_seq"), int) else 0))
+            )
+            if heartbeat_fresh and waiting_is_current:
+                state = "waiting"
+                reason = str(latest_waiting.get("phase", "workflow response"))
+            elif heartbeat_fresh and run_status == "running":
+                state = "running"
+                reason = "recent per-agent heartbeat"
+            elif last_heartbeat is None:
+                state = "unknown"
+                reason = "agent startup observed; per-agent heartbeat unavailable"
             else:
-                state = "unknown (start outcome unavailable)"
-        elif event_type == "agent_started":
-            if run_status == "running":
-                state = "running (start observed)" if run_fresh else "stale"
-            elif run_status == "failed":
-                state = "unknown (run failed before stop was observed)"
-            else:
-                state = "unknown (stop was not observed)"
-        elif event_type == "agent_stopping":
-            state = "stopping" if run_fresh else "stale"
-        last_seen: datetime | None = _parse_time(latest.get("timestamp"))
+                state = "stale"
+                reason = "per-agent heartbeat is stale"
+        elif starting_event is not None:
+            age = (observed_now - (_parse_time(starting_event.get("timestamp")) or observed_now)).total_seconds()
+            if run_status == "running" and run_fresh and age <= stale_after_s:
+                state = "starting"
+                reason = "startup requested; startup confirmation not recorded"
+            elif age > stale_after_s:
+                state = "stale"
+                reason = "startup requested without recent confirmation"
+
+        last_seen: datetime | None = last_heartbeat
+        if last_seen is None:
+            last_seen = _parse_time(latest.get("timestamp"))
         sent = received = 0
         for message in messages:
-            if message.get("sender") == identity or message.get("receiver") == identity:
-                parsed = _parse_time(message.get("timestamp"))
-                if parsed and (last_seen is None or parsed > last_seen):
-                    last_seen = parsed
             if message.get("direction") == "sent" and message.get("sender") == identity:
                 sent += 1
             elif message.get("direction") == "received" and message.get("receiver") == identity:
@@ -218,7 +268,8 @@ def derive_agent_states(events: Sequence[Mapping[str, Any]], messages: Sequence[
         record.pop("_events", None)
         output.append({"Component": record["Component"], "Identity": identity, "Status": state,
                        "Last observed": last_seen.isoformat() if last_seen else "Unavailable",
-                       "Sent messages": sent, "Received messages": received})
+                       "Sent messages": sent, "Received messages": received,
+                       "Status evidence": reason})
     return tuple(sorted(output, key=lambda row: (row["Component"], row["Identity"])))
 
 
@@ -309,17 +360,25 @@ def load_agent_monitor(run_dir: str | Path, *, stale_after_s: float = 15.0,
     errors.extend(message_errors)
 
     current = now or datetime.now(timezone.utc)
-    heartbeats = [_parse_time(event.get("timestamp")) for event in events
-                  if event.get("event_type") == "heartbeat"]
+    runner_heartbeats = [_parse_time(event.get("timestamp")) for event in events
+                         if event.get("event_type") in {"heartbeat", "runner_heartbeat"}]
+    agent_heartbeats = [_parse_time(event.get("timestamp")) for event in events
+                        if event.get("event_type") == "agent_heartbeat"]
     log_times = [_parse_time(row.get("timestamp")) for row in messages]
-    times = [value for value in [*heartbeats, *log_times] if value is not None]
+    times = [value for value in [*runner_heartbeats, *agent_heartbeats, *log_times]
+             if value is not None]
     last_activity_dt = max(times) if times else None
     age = (current.astimezone(timezone.utc) - last_activity_dt).total_seconds() if last_activity_dt else None
+    runner_heartbeat_dt = max((value for value in runner_heartbeats if value is not None), default=None)
+    runner_heartbeat_age = ((current.astimezone(timezone.utc) - runner_heartbeat_dt).total_seconds()
+                            if runner_heartbeat_dt is not None else None)
     run_status = str(manifest.get("status", "unknown"))
     if any(event.get("event_type") == "run_finished" for event in events):
         last_finished = next(event for event in reversed(events) if event.get("event_type") == "run_finished")
         run_status = str(last_finished.get("status", run_status))
-    fresh = age is not None and age <= stale_after_s
+    # Message traffic and agent heartbeats are activity evidence, but only the runner heartbeat
+    # establishes that the orchestrator is still advancing/observing the run.
+    fresh = runner_heartbeat_age is not None and runner_heartbeat_age <= stale_after_s
     if run_status == "running":
         freshness = "live" if fresh else "stale"
     elif run_status == "failed":
@@ -341,7 +400,9 @@ def load_agent_monitor(run_dir: str | Path, *, stale_after_s: float = 15.0,
         elif direction == "received":
             counts[receiver]["received"] += 1
         flows[(sender, receiver)] = flows.get((sender, receiver), 0) + 1
-    lifecycle = tuple(event for event in events if str(event.get("event_type", "")).startswith("agent_"))
+    lifecycle = tuple(event for event in events
+                      if str(event.get("event_type", "")).startswith("agent_")
+                      and event.get("event_type") != "agent_heartbeat")
     agents = derive_agent_states(events, messages, run_status=run_status, run_fresh=fresh,
                                  configured_agents=_configured_identities(manifest),
                                  now=current, stale_after_s=stale_after_s)
