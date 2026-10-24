@@ -569,6 +569,7 @@ def _final_decisions(details: SimulationRunDetails) -> dict[str, Any]:
         "delivery": row.get("delivery_status", "Unavailable"),
         "reason": row.get("reason", "Unavailable"),
     } for row in details.alerts.rows)
+    unavailable_explanations = _unavailable_explanations(details, hotspot_rows, alert_rows)
     stage_status = details.manifest.get("stage_status", {}) if details.manifest else {}
     unavailable_stages = tuple((key, value) for key, value in stage_status.items()
                                if isinstance(value, str) and any(word in value.casefold()
@@ -578,7 +579,7 @@ def _final_decisions(details: SimulationRunDetails) -> dict[str, Any]:
     unavailable_metrics = tuple({
         "metric": row.get("metric", "Unknown metric"),
         "status": row.get("status", "unavailable"),
-        "details": row.get("details", "Required evidence unavailable."),
+        "details": _explain_metric_unavailability(row.get("details")),
     } for row in details.evaluation.rows
       if str(row.get("status", "")).casefold() in {"unavailable", "partial"})
     return {
@@ -587,10 +588,153 @@ def _final_decisions(details: SimulationRunDetails) -> dict[str, Any]:
         "hotspots": hotspot_rows, "hotspot_status": details.hotspots.status,
         "alerts": alert_rows, "alert_status": details.alerts.status,
         "unavailable_stages": unavailable_stages,
+        "unavailable_explanations": unavailable_explanations,
         "failures": tuple(failures) if isinstance(failures, list) else (),
         "evaluation_status": details.evaluation.status,
         "unavailable_metrics": unavailable_metrics,
     }
+
+
+def _explain_metric_unavailability(raw_details: Any) -> str:
+    """Turn evaluator reason JSON into short plain-language explanations."""
+    try:
+        parsed = json.loads(raw_details) if isinstance(raw_details, str) else raw_details
+    except (TypeError, json.JSONDecodeError):
+        parsed = raw_details
+    reason = parsed.get("reason") if isinstance(parsed, Mapping) else None
+    if not isinstance(reason, str):
+        return str(raw_details or "Required evidence unavailable.")
+    explanations = {
+        "reference-to-tier mapping is not supplied":
+            "No reference-to-tier mapping was supplied; alignment cannot be calculated.",
+        "allocation log is missing":
+            "No evaluator allocation input was supplied. Round awards are shown separately; comparisons also require verified baselines, population inputs, and an agreed risk-weight definition.",
+        "baseline not verified":
+            "The allocation baseline is not verified; no comparison is reported.",
+        "risk-input event selector is not supplied":
+            "No agreed risk-input receipt selector was supplied for pairing arrivals with issued alerts.",
+        "complete consistently threaded negotiation history is not confirmed":
+            "Complete negotiation history with consistent round threads has not been confirmed.",
+        "no sent alert-issued events":
+            "No sent alert-issued messages were recorded; unavailable or suppressed decisions are not deliveries.",
+        "no uniquely correlated risk receipt and sent alert":
+            "No uniquely matched risk receipt and issued alert pair was recorded.",
+    }
+    return explanations.get(reason, f"Required evidence unavailable: {reason}.")
+
+
+def _unavailable_explanations(
+    details: SimulationRunDetails,
+    hotspot_rows: Sequence[Mapping[str, Any]],
+    alert_rows: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Summarize recorded unavailable outcomes by stage, month, and division.
+
+    This is a presentation adapter only: it uses artifact reasons and never infers an
+    inactive hotspot, safe risk, or successful alert from absent evidence.
+    """
+    configuration = details.manifest.get("configuration", {}) if details.manifest else {}
+    configuration = configuration if isinstance(configuration, Mapping) else {}
+    rule = configuration.get("hotspot_rule")
+    rule = rule if isinstance(rule, Mapping) else None
+    try:
+        window_value = rule["consecutive_months"] if rule else None
+        configured_window = (window_value if isinstance(window_value, int) and not isinstance(window_value, bool)
+                             and window_value > 0 else None)
+    except (KeyError, TypeError):
+        configured_window = None
+    start_value = configuration.get("start_month_index")
+    configured_start = (start_value if isinstance(start_value, int) and not isinstance(start_value, bool)
+                        and start_value >= 0 else None)
+
+    def is_expected_warmup(reason: str, month: Any) -> bool:
+        return bool(
+            reason == "insufficient_consecutive_month_history"
+            and configured_window is not None
+            and configured_start is not None
+            and isinstance(month, int) and not isinstance(month, bool)
+            and configured_start <= month < configured_start + configured_window - 1
+        )
+
+    hotspot_by_key = {
+        (str(row.get("division")), str(row.get("month_index"))): row
+        for row in hotspot_rows
+    }
+    grouped: dict[tuple[str, str, str, bool], set[str]] = {}
+
+    def add(stage: str, row: Mapping[str, Any], raw_reason: Any, *, expected: bool = False) -> None:
+        month = str(row.get("month_index", "Unavailable"))
+        division = str(row.get("division", "Unavailable"))
+        reason = str(raw_reason or "required evidence is unavailable")
+        grouped.setdefault((stage, month, reason, expected), set()).add(division)
+
+    def explain_hotspot_reason(reason: str) -> str:
+        if reason == "screening_rule_not_configured":
+            return "No provisional tier-persistence rule was configured for this run."
+        if reason == "insufficient_consecutive_month_history":
+            return "Expected warm-up: the configured consecutive-month history is not yet complete."
+        if reason.startswith("missing_month_indexes:"):
+            missing = reason.partition(":")[2].replace(",", ", ")
+            return f"Risk history is missing simulated month_index value(s): {missing}."
+        if reason.startswith("unknown_risk_tier_at_month_index_"):
+            index = reason.rsplit("_", 1)[-1]
+            return f"Risk tier is Unknown at month_index {index}; screening remains unavailable."
+        if reason.startswith("invalid_risk_record:"):
+            return "A risk record failed schema validation; screening remains unavailable."
+        if reason.startswith("missing_wqi_at_month_index_"):
+            index = reason.rsplit("_", 1)[-1]
+            return f"A required WQI value is missing at month_index {index}; screening remains unavailable."
+        return reason.replace("_", " ")
+
+    for row in hotspot_rows:
+        if str(row.get("status", "")).casefold() != "unavailable":
+            continue
+        raw_reason = str(row.get("reason") or "required risk history is unavailable")
+        expected_warmup = is_expected_warmup(raw_reason, row.get("month_index"))
+        add("Hotspot screening", row, explain_hotspot_reason(raw_reason), expected=expected_warmup)
+
+    for row in alert_rows:
+        if str(row.get("decision", "")).casefold() != "unavailable":
+            continue
+        reason = str(row.get("reason") or "required alert evidence is unavailable")
+        expected_warmup = False
+        hotspot = hotspot_by_key.get((str(row.get("division")), str(row.get("month_index"))))
+        if reason == "hotspot_status_unavailable" and hotspot is not None:
+            upstream_reason = str(hotspot.get("reason") or "screening evidence is unavailable")
+            if upstream_reason == "screening_rule_not_configured":
+                reason = "No alert decision: hotspot screening is unavailable because no provisional rule was configured."
+            elif upstream_reason == "insufficient_consecutive_month_history":
+                reason = "No alert decision: hotspot screening is in its expected history warm-up period."
+                expected_warmup = is_expected_warmup(upstream_reason, row.get("month_index"))
+            else:
+                reason = f"No alert decision: hotspot evidence is unavailable ({explain_hotspot_reason(upstream_reason)})."
+        add("Alert processing", row, reason, expected=expected_warmup)
+
+    # Preserve stage-level unavailability when no row artifact explains it.
+    stage_status = details.manifest.get("stage_status", {}) if details.manifest else {}
+    if isinstance(stage_status, Mapping):
+        represented = {key[0] for key in grouped}
+        for stage, value in stage_status.items():
+            if not isinstance(value, str) or not any(token in value.casefold()
+                    for token in ("unavailable", "partial", "failed", "incomplete", "skipped")):
+                continue
+            display_stage = {"hotspot_screening": "Hotspot screening", "alert_decisions": "Alert processing"}.get(
+                str(stage), str(stage).replace("_", " ").capitalize())
+            if display_stage in represented:
+                continue
+            reason = value
+            if value == "unavailable_rule_not_configured":
+                reason = "No provisional hotspot rule was configured for this run."
+            grouped.setdefault((display_stage, "All configured months", reason, False), set()).add(
+                "Affected records are not available")
+
+    return tuple({
+        "stage": stage,
+        "month_index": month,
+        "divisions": tuple(sorted(divisions)),
+        "expected": expected,
+        "reason": reason,
+    } for (stage, month, reason, expected), divisions in sorted(grouped.items()))
 
 
 def build_execution_view(details: SimulationRunDetails, *, run_status: str | None = None) -> dict[str, Any]:

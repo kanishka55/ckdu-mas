@@ -12,12 +12,45 @@ from src.agents.clock import ClockAgent
 from src.agents import common
 from src.core import msg_log, ontology
 from src.core.hotspot_screening import ScreeningRule
-from src.sim.runner import SimulationConfig, run_simulation, validate_output_dir
+from src.sim.runner import (
+    SimulationConfig,
+    _has_unavailable_stages,
+    run_simulation,
+    validate_output_dir,
+)
 from src.sim.agent_monitor import load_agent_monitor
 from src.sim.agent_monitor import read_event_journal
 
 
 class SimulationRunnerConfigurationTests(unittest.TestCase):
+    def test_success_status_is_based_on_recorded_stage_and_metric_evidence(self):
+        complete = {
+            "stage_status": {"risk_scoring": "complete", "hotspot_screening": "screening_outputs_recorded"},
+            "months": [{"status": "complete", "hotspot_screening": "complete",
+                        "alert_decisions": "complete", "alert_delivery": {"unavailable": 0}}],
+            "evaluation_status": {"example_metric": {"status": "ok", "value": 1}},
+            "failures": [],
+        }
+        incomplete = {
+            **complete,
+            "months": [{"status": "complete", "hotspot_screening": "partially_unavailable",
+                        "alert_delivery": {"unavailable": 1}}],
+        }
+        self.assertFalse(_has_unavailable_stages(
+            complete["stage_status"], complete["months"],
+            complete["evaluation_status"], complete["failures"],
+        ))
+        self.assertTrue(_has_unavailable_stages(
+            incomplete["stage_status"], incomplete["months"],
+            incomplete["evaluation_status"], {"failures": incomplete["failures"]},
+        ))
+        metric_unavailable = {"metric": {"status": "unavailable", "value": None}}
+        self.assertTrue(_has_unavailable_stages(complete["stage_status"], complete["months"],
+                                                metric_unavailable, []))
+        self.assertTrue(_has_unavailable_stages(complete["stage_status"], complete["months"],
+                                                complete["evaluation_status"],
+                                                {"failures": [{"stage": "output", "error": "write failed"}]}))
+
     def test_clock_tick_uses_explicit_calendar_month_and_shared_schema(self):
         body = ClockAgent.tick_body(17, 10)
         self.assertEqual(body, {"type": "month_tick", "month_index": 17,

@@ -17,7 +17,7 @@ from src.sim.run_details import (
     filter_messages,
     load_simulation_run_details,
 )
-from dashboard.app import _pretty_event_rows, _render_run_detail_page
+from dashboard.app import _pretty_event_rows, _render_final_decisions, _render_run_detail_page
 
 
 class SimulationRunDetailsTests(unittest.TestCase):
@@ -147,8 +147,10 @@ class SimulationRunDetailsTests(unittest.TestCase):
         self.assertEqual(view["decisions"]["hotspots"][0]["history"], [1, 2])
         self.assertEqual(view["decisions"]["hotspots"][0]["status"], "active")
         self.assertEqual(view["decisions"]["alerts"][0]["delivery"], "confirmed")
-        self.assertTrue(any(item["metric"] == "allocation_efficiency"
-                            for item in view["decisions"]["unavailable_metrics"]))
+        allocation_metric, = [item for item in view["decisions"]["unavailable_metrics"]
+                              if item["metric"] == "allocation_efficiency"]
+        self.assertIn("baseline is not verified", allocation_metric["details"])
+        self.assertNotIn("{\"reason\"", allocation_metric["details"])
         village_card, = [row for row in view["agents"] if row["identity"] == "village@localhost"]
         self.assertEqual(village_card["latest_input"], "Waiting for input.")
         self.assertEqual(village_card["output_to"], "No output recipient/destination recorded.")
@@ -202,6 +204,100 @@ class SimulationRunDetailsTests(unittest.TestCase):
         display_row, = _pretty_event_rows([event])
         self.assertEqual(display_row["ds_division"], "Sample")
         self.assertEqual(display_row["screening_status"], "unavailable")
+
+    def test_unavailable_stage_reasons_trace_unconfigured_rule_to_alert_withholding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = self._run(Path(temp))
+            manifest_path = run_dir / "run_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["stage_status"] = {"hotspot_screening": "unavailable_rule_not_configured"}
+            manifest["configuration"]["hotspot_rule"] = None
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            (run_dir / "hotspot_screening.json").write_text(json.dumps([{
+                "month_index": 2, "ds_division": "Sample", "status": "unavailable",
+                "evidence_month_indexes": [], "reason": "screening_rule_not_configured",
+            }]), encoding="utf-8")
+            (run_dir / "alert_decisions.json").write_text(json.dumps([{
+                "month_index": 2, "ds_division": "Sample", "status": "unavailable",
+                "hotspot_status": "unavailable", "delivery_status": "not_requested",
+                "reason": "hotspot_status_unavailable",
+            }]), encoding="utf-8")
+            details = load_simulation_run_details(run_dir)
+            decisions = build_execution_view(details)["decisions"]
+
+        explanations = decisions["unavailable_explanations"]
+        hotspot, = [row for row in explanations if row["stage"] == "Hotspot screening"]
+        alert, = [row for row in explanations if row["stage"] == "Alert processing"]
+        self.assertIn("No provisional tier-persistence rule was configured", hotspot["reason"])
+        self.assertEqual(hotspot["month_index"], "2")
+        self.assertEqual(hotspot["divisions"], ("Sample",))
+        self.assertFalse(hotspot["expected"])
+        self.assertIn("no provisional rule was configured", alert["reason"])
+        self.assertFalse(alert["expected"])
+
+    def test_configured_persistence_warmup_is_reported_as_expected_not_as_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = self._run(Path(temp))
+            manifest_path = run_dir / "run_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["configuration"]["start_month_index"] = 0
+            manifest["configuration"]["end_month_index"] = 1
+            manifest["configuration"]["hotspot_rule"] = {
+                "rule_id": "illustrative", "trigger_tiers": ["Poor"], "consecutive_months": 2,
+            }
+            manifest["stage_status"] = {"hotspot_screening": "screening_outputs_recorded"}
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            (run_dir / "hotspot_screening.json").write_text(json.dumps([
+                {"month_index": 0, "ds_division": "Sample", "status": "unavailable",
+                 "evidence_month_indexes": [], "reason": "insufficient_consecutive_month_history"},
+                {"month_index": 1, "ds_division": "Sample", "status": "active",
+                 "evidence_month_indexes": [0, 1], "reason": None},
+            ]), encoding="utf-8")
+            (run_dir / "alert_decisions.json").write_text(json.dumps([{
+                "month_index": 0, "ds_division": "Sample", "status": "unavailable",
+                "hotspot_status": "unavailable", "delivery_status": "not_requested",
+                "reason": "hotspot_status_unavailable",
+            }]), encoding="utf-8")
+            decisions = build_execution_view(load_simulation_run_details(run_dir))["decisions"]
+
+        hotspot, = [row for row in decisions["unavailable_explanations"]
+                    if row["stage"] == "Hotspot screening"]
+        alert, = [row for row in decisions["unavailable_explanations"]
+                  if row["stage"] == "Alert processing"]
+        self.assertTrue(hotspot["expected"])
+        self.assertTrue(alert["expected"])
+        self.assertIn("warm-up", alert["reason"])
+
+    def test_unavailable_stage_summary_renders_short_cause_and_affected_month(self):
+        class Box:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Recorder:
+            def __init__(self):
+                self.text = []
+
+            def __getattr__(self, name):
+                if name in {"columns"}:
+                    return lambda count: [Box() for _ in range(count)]
+                return lambda value, **_kwargs: self.text.append((name, str(value)))
+
+        recorder = Recorder()
+        _render_final_decisions(recorder, {
+            "risks": (), "risk_status": "available", "hotspots": (), "hotspot_status": "available",
+            "allocations": (), "allocation_status": "available", "alerts": (), "alert_status": "available",
+            "failures": (), "unavailable_stages": (), "unavailable_explanations": ({
+                "stage": "Hotspot screening", "month_index": "0", "divisions": ("Sample",),
+                "expected": True, "reason": "Insufficient prior history.",
+            },), "evaluation_status": "available", "unavailable_metrics": (),
+        }, "completed_with_unavailable_stages")
+        rendered = " ".join(value for _name, value in recorder.text)
+        self.assertIn("month_index 0", rendered)
+        self.assertIn("expected warm-up", rendered)
+        self.assertIn("Insufficient prior history", rendered)
 
     def test_missing_and_partially_written_artifacts_remain_explicit(self):
         with tempfile.TemporaryDirectory() as temp:

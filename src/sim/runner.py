@@ -291,6 +291,26 @@ def _read_message_counts(path: Path) -> dict[str, Any]:
             "by_performative": dict(sorted(by_performative.items()))}
 
 
+def _has_unavailable_stages(*evidence_sections: Any) -> bool:
+    """Detect recorded partial, unavailable, or failed work without inspecting provenance text."""
+    status_tokens = ("unavailable", "partial", "incomplete", "failed", "skipped", "not_configured")
+
+    def contains(value: Any, key: Any = None) -> bool:
+        if key == "failures" and isinstance(value, (list, tuple)):
+            return bool(value)
+        if key == "unavailable" and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value > 0
+        if isinstance(value, str):
+            return any(token in value.casefold() for token in status_tokens)
+        if isinstance(value, Mapping):
+            return any(contains(item, item_key) for item_key, item in value.items())
+        if isinstance(value, (list, tuple)):
+            return any(contains(item) for item in value)
+        return False
+
+    return any(contains(section) for section in evidence_sections)
+
+
 async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
     """Run configured SPADE months; write every artifact only below a fresh output root."""
     output_root = validate_output_dir(config.output_dir)
@@ -709,7 +729,13 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             for result in results
         }
         manifest["message_counts"] = _read_message_counts(log_path)
-        manifest["status"] = "completed_with_unavailable_stages"
+        manifest["status"] = (
+            "completed_with_unavailable_stages"
+            if _has_unavailable_stages(
+                manifest.get("stage_status", {}), months,
+                manifest.get("evaluation_status", {}), {"failures": failures},
+            ) else "completed"
+        )
         _append_monitor_event(event_path, "run_completed", "SimulationRunner",
                               status=manifest["status"])
     except Exception as exc:
@@ -765,6 +791,14 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             manifest["stage_status"] = {"runner": "failed_before_agent_start"}
         if not manifest.get("status") or manifest["status"] == "running":
             manifest["status"] = "failed" if failures else "incomplete"
+        elif manifest["status"] != "failed":
+            manifest["status"] = (
+                "completed_with_unavailable_stages"
+                if _has_unavailable_stages(
+                    manifest.get("stage_status", {}), months,
+                    manifest.get("evaluation_status", {}), {"failures": failures},
+                ) else "completed"
+            )
         if heartbeat_task is not None:
             heartbeat_task.cancel()
             try:

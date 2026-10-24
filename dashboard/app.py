@@ -1279,7 +1279,14 @@ def _render_final_decisions(st: Any, decisions: Mapping[str, Any], status: str) 
         st.error("The run records failure evidence.")
         for failure in decisions["failures"]:
             st.caption(str(failure))
-    if decisions["unavailable_stages"]:
+    if decisions.get("unavailable_explanations"):
+        st.warning("Unavailable stages and reasons")
+        for item in decisions["unavailable_explanations"]:
+            month = item["month_index"]
+            divisions = ", ".join(item["divisions"])
+            expected = " · expected warm-up" if item["expected"] else ""
+            st.caption(f"{item['stage']} · month_index {month} · {divisions}{expected}: {item['reason']}")
+    elif decisions["unavailable_stages"]:
         st.warning("Unavailable or incomplete stages")
         for stage, reason in decisions["unavailable_stages"]:
             st.caption(f"{stage}: {reason}")
