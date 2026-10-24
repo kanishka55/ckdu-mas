@@ -1654,9 +1654,9 @@ def _render_simulation_lab(st: Any, lab_root: Path) -> None:
                 input_error = str(exc)
     if input_error:
         st.error(f"Input unavailable: {input_error}")
-    if preview_rows:
-        st.caption("Preview: exact existing seasonal input schema; additional or missing columns are rejected.")
-        st.dataframe(list(preview_rows), use_container_width=True)
+    # if preview_rows:
+    #     st.caption("Preview: exact existing seasonal input schema; additional or missing columns are rejected.")
+        # st.dataframe(list(preview_rows), use_container_width=True)
 
     st.markdown("#### Provisional hotspot screening")
     with st.expander("Configure an optional tier-persistence screen"):
