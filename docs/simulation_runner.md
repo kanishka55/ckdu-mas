@@ -67,19 +67,26 @@ reduced parameter set and is not diagnostic or causal evidence about CKDu. A rul
 consecutive months cannot produce an available screening result until that full history is present;
 for the two-month example, the first simulated month is unavailable during warm-up.
 
-`dashboard/app.py` exposes an **Agent Monitor** source when selected. Set
-`CKDU_SIMULATION_RUN_DIR` to one isolated output directory from this runner. It reads that run's
-event journal, final manifest, message log, round files, hotspot results, and alert outcomes; it does
-not infer a run from `logs/`, fixture files, or `CKDU_DEMO_OUTPUT_DIR`. While the manifest is running,
-freshness is based on recent journal/message evidence and the dashboard fragment refreshes every two
-seconds. Per-agent `running` and `waiting` require a recent heartbeat from that identity; `waiting`
-additionally requires an unresolved recorded workflow phase. `completed` requires explicit
+`dashboard/app.py` exposes an **Agent Monitor** snapshot and a separate **Live Coordination** page
+when selected. Set `CKDU_SIMULATION_RUN_DIR` to one isolated output directory from this runner. Both
+views use the same monitor loader and read that run's event journal, manifest, message log, round
+files, hotspot results, and alert outcomes; neither infers a run from `logs/`, fixtures, or
+`CKDU_DEMO_OUTPUT_DIR`. Live Coordination refreshes every two seconds when Streamlit fragment
+support is available. It shows the recent event timeline, per-agent heartbeat/phase evidence, the
+unmodified seven-column message rows, month/round progress, and recorded hotspot and alert outcomes.
+Timeline rows identify runner stage observations separately from agent behavior events; only the
+directional message CSV represents logged SPADE send/receive operations. No missing correlation is
+reconstructed.
+
+While the manifest says running, run freshness requires a recent runner heartbeat. Per-agent
+`running` and `waiting` require a recent heartbeat from that identity; `waiting` additionally
+requires an unresolved recorded workflow phase. `completed` requires explicit
 `agent_work_completed`; clean shutdown alone maps to unknown if work completion was not recorded.
-Behavior/start/stop failures map to failed. Once `run_finished` is recorded, the same view is a
-persisted snapshot. Heartbeats are liveness evidence only, not a behavior health check or proof that
-external XMPP is reachable. Missing or stale evidence is shown as unknown/stale. Older journals
-remain readable, but without per-agent heartbeat and work-completion events their agent states remain
-unknown rather than being inferred from message freshness.
+Behavior/start/stop failures map to failed. Once `run_finished` is recorded, the page labels the run
+as a persisted snapshot, never live. Heartbeats are liveness evidence only, not a behavior health
+check or proof that external XMPP is reachable. Missing or stale evidence is shown as unknown/stale.
+Older journals remain readable, but without per-agent heartbeat and work-completion events their
+agent states remain unknown rather than being inferred from message freshness.
 
 Example: two simulated months, with explicit calendar labels and a fresh output path:
 
@@ -108,7 +115,8 @@ host directory at `/app/simulation_run` in both services. Inside the dashboard c
 `--output-dir` is also a **container path**, so use `/app/simulation_run` there.
 
 Use a fresh host directory and reuse the same variable for the runner and dashboard. This macOS
-example creates a new temporary directory, runs two simulated months, and then starts the monitor:
+example creates a new temporary directory, runs two simulated months, and then starts the monitor
+on the completed persisted snapshot:
 
 ```sh
 RUN_HOST_DIR="$(mktemp -d /private/tmp/ckdu-simulation.XXXXXX)"
@@ -130,3 +138,20 @@ not a validated epidemiological model. Keep the generated host directory. The ru
 non-empty output roots, and the dashboard should use that same host directory to inspect the
 persisted snapshot. `RUN_HOST_DIR` is just a shell variable; retain it in the shell where you start
 the dashboard, or export `CKDU_SIMULATION_RUN_HOST_DIR` again to the same host path.
+
+To observe the run while it executes, start the dashboard first in terminal 1:
+
+```sh
+export CKDU_SIMULATION_RUN_HOST_DIR="$(mktemp -d /private/tmp/ckdu-live-run.XXXXXX)"
+printf 'Simulation run host directory: %s\n' "$CKDU_SIMULATION_RUN_HOST_DIR"
+docker compose up -d dashboard
+```
+
+In terminal 2, export `CKDU_SIMULATION_RUN_HOST_DIR` to the exact path printed in terminal 1, then
+run the same two-month `docker compose run ... python -m src.sim.runner` command above. The runner
+writes to `/app/simulation_run` through its read/write bind mount; the dashboard reads that same
+host directory at `/app/simulation_run` through a read-only mount. Open `http://localhost:8501`,
+select **Live Coordination**, and watch the two-second refresh. After `run_finished` is recorded, the
+page reports a completed snapshot. `docker compose down` stops the dashboard and preserves the host
+run directory. Do not reuse a non-empty run directory or use different host paths in the two
+terminals.

@@ -747,6 +747,162 @@ def _render_agent_monitor(st: Any, run_dir: Path) -> None:
     _render_agent_monitor_snapshot(st, snapshot)
 
 
+def _live_coordination_model(snapshot: AgentMonitorSnapshot) -> dict[str, Any]:
+    """Prepare a display model from the same run-local monitor snapshot used elsewhere."""
+    coordinator_events = [event for event in snapshot.timeline_events
+                         if str(event.get("component", "")).startswith("ResourceCoordinatorAgent")
+                         and event.get("event_type") in {"agent_phase", "agent_waiting"}]
+    current_month = next((row.get("month_index") for row in reversed(snapshot.months)
+                          if row.get("status") == "running"), None)
+    if current_month is None and snapshot.months:
+        current_month = snapshot.months[-1].get("month_index")
+    latest_round = snapshot.rounds[-1] if snapshot.rounds else None
+    latest_phase = coordinator_events[-1] if coordinator_events else None
+    return {
+        "run_state": snapshot.freshness,
+        "run_status": snapshot.run_status,
+        "run_id": snapshot.run_id,
+        "run_dir": str(snapshot.run_dir),
+        "agents": snapshot.agents,
+        "timeline": snapshot.timeline_events,
+        # Keep precisely the seven logger columns. Do not collapse sent/received copies.
+        "messages": tuple({key: row.get(key, "") for key in (
+            "timestamp", "sender", "receiver", "performative", "thread_id", "payload", "direction",
+        )} for row in snapshot.messages),
+        "message_status": snapshot.message_status,
+        "flows": snapshot.flows,
+        "months": snapshot.months,
+        "current_month_index": current_month,
+        "latest_coordinator_phase": latest_phase,
+        "latest_round": latest_round,
+        "rounds": snapshot.rounds,
+        "rounds_status": snapshot.rounds_status,
+        "hotspots": snapshot.hotspots,
+        "hotspots_status": snapshot.hotspots_status,
+        "alerts": snapshot.alerts,
+        "alerts_status": snapshot.alerts_status,
+        "errors": snapshot.errors,
+    }
+
+
+def _coordination_event_source(event: Mapping[str, Any]) -> str:
+    event_type = event.get("event_type")
+    if event.get("component") == "SimulationRunner" or event_type in {
+        "hotspot_result", "alert_outcome", "round_completed",
+    }:
+        return "Runner observation / persisted stage result"
+    if event_type in {
+        "agent_starting", "agent_started", "agent_start_failed", "agent_work_completed",
+        "agent_work_failed", "agent_stopped", "agent_stop_failed",
+    }:
+        return "Runner lifecycle/work observation"
+    return "Agent behavior event journal"
+
+
+def _render_live_coordination_snapshot(st: Any, snapshot: AgentMonitorSnapshot) -> None:
+    model = _live_coordination_model(snapshot)
+    st.subheader("Live Agent Coordination")
+    st.caption(f"Run ID: {model['run_id']} · configured run directory: {model['run_dir']}")
+    st.caption("Source is one explicitly configured SPADE run. Team outputs, illustrative fixtures, and generated local-demo data are separate.")
+    if model["run_state"] == "live":
+        st.success("Run active: the runner heartbeat is fresh. This is not a health check of domain behavior.")
+    elif model["run_state"] == "stale":
+        st.warning("Run manifest says running, but runner heartbeat evidence is stale. Current activity is not confirmed.")
+    elif model["run_state"] == "completed snapshot":
+        st.info("Run completed. This is a persisted snapshot, not a live process view.")
+    elif model["run_state"] == "failed snapshot":
+        st.error("Run failed. This is its persisted failure snapshot.")
+    else:
+        st.warning("Run state is unknown. No live state is inferred.")
+    st.caption("Per-agent running/waiting states require that agent's fresh heartbeat. Heartbeats indicate liveness evidence only.")
+
+    current_phase = model["latest_coordinator_phase"]
+    current_round = model["latest_round"]
+    left, right, third = st.columns(3)
+    left.metric("Current month_index", model["current_month_index"] if model["current_month_index"] is not None else "Unavailable")
+    right.metric("Contract Net phase", current_phase.get("phase", "Unavailable") if current_phase else "Unavailable")
+    third.metric("Latest round outcome", current_round.get("award_status", "Unavailable") if current_round else "Unavailable")
+
+    st.markdown("#### Agent lifecycle and heartbeat evidence")
+    if model["agents"]:
+        st.dataframe(list(model["agents"]), use_container_width=True)
+    else:
+        st.info("No agent identities have been observed or configured in this run manifest.")
+
+    st.markdown("#### Event timeline")
+    st.caption("Runner stage summaries are distinguished from agent behavior events. SPADE message exchanges are shown separately from both.")
+    if model["timeline"]:
+        timeline = [{
+            "Timestamp": event.get("timestamp", "Unavailable"),
+            "Sequence": event.get("event_seq", "Unavailable"),
+            "Source": _coordination_event_source(event),
+            "Component": event.get("component", "Unknown"),
+            "Identity": event.get("identity", "Unavailable"),
+            "Event": event.get("event_type", "Unknown"),
+            "month_index": event.get("month_index", "Unavailable"),
+            "Round": event.get("round", "Unavailable"),
+            "Thread/correlation": event.get("thread_id", "Unavailable"),
+            "Phase": event.get("phase", "Unavailable"),
+            "Outcome": event.get("outcome", event.get("status", "Unavailable")),
+            "Details": event.get("reason", event.get("decision_status", "")),
+        } for event in model["timeline"][-100:]]
+        st.caption(f"Showing the most recent {len(timeline)} of {len(model['timeline'])} journal events.")
+        st.dataframe(timeline, use_container_width=True)
+    else:
+        st.info("No event-journal rows are available yet.")
+
+    st.markdown("#### SPADE message flow")
+    st.caption(f"Seven-column logger status: {model['message_status']}. Rows are preserved as logged, including direction and ambiguous copies.")
+    st.caption("Logged message rows are evidence of SPADE send/receive operations. Runner stage events and local helper results are not message exchanges.")
+    if model["flows"]:
+        st.dataframe(list(model["flows"]), use_container_width=True)
+    else:
+        st.info("No sender/receiver message flow is available.")
+    if model["messages"]:
+        st.dataframe(list(model["messages"]), use_container_width=True)
+    else:
+        st.info("No message rows are available. Missing rows are not inferred or reconstructed.")
+
+    st.markdown("#### Month progression and Contract Net outcomes")
+    if model["months"]:
+        st.dataframe(list(model["months"]), use_container_width=True)
+    else:
+        st.info("Month progression is unavailable.")
+    if model["rounds"]:
+        st.dataframe([{
+            "month_index": row.get("month_index"), "Round": row.get("round", "Unavailable"),
+            "Resource": row.get("resource", "Unavailable"),
+            "Award status": row.get("award_status", "Unavailable"),
+            "Winner": row.get("winner") if row.get("award_status") == "confirmed" else "Not confirmed",
+        } for row in model["rounds"]], use_container_width=True)
+    else:
+        st.info(f"Contract Net results {model['rounds_status']}; no persisted round result is available.")
+
+    st.markdown("#### Hotspot screening and alert outcomes")
+    st.caption("Hotspot results are project-defined provisional screening, not epidemiological validation. Unknown or unavailable does not mean inactive or safe.")
+    if model["hotspots"]:
+        st.dataframe(list(model["hotspots"]), use_container_width=True)
+    else:
+        st.info(f"Hotspot results {model['hotspots_status']}.")
+    st.caption("Alert confirmation refers only to the run-local simulated inbox, not an external health officer.")
+    if model["alerts"]:
+        st.dataframe(list(model["alerts"]), use_container_width=True)
+    else:
+        st.info(f"Alert outcomes {model['alerts_status']}.")
+    if model["errors"]:
+        with st.expander("Incomplete or malformed run data"):
+            for error in model["errors"]:
+                st.warning(error)
+
+
+def _render_live_coordination(st: Any, run_dir: Path | None) -> None:
+    if run_dir is None:
+        st.subheader("Live Agent Coordination")
+        st.info("No simulation run is configured. Set CKDU_SIMULATION_RUN_DIR to the run directory containing run_manifest.json, agent_events.jsonl, and logs/messages.csv.")
+        return
+    _render_live_coordination_snapshot(st, load_agent_monitor(run_dir))
+
+
 def main() -> None:
     try:
         import streamlit as st
@@ -759,7 +915,7 @@ def main() -> None:
     data_root = Path(os.environ.get("CKDU_DATA_ROOT", ROOT / "data"))
     demo_output = os.environ.get("CKDU_DEMO_OUTPUT_DIR")
     simulation_run = os.environ.get("CKDU_SIMULATION_RUN_DIR")
-    views = ("Team outputs", "Illustrative demo fixtures") + (("Generated local demo",) if demo_output else ()) + ("Agent Monitor",)
+    views = ("Team outputs", "Illustrative demo fixtures") + (("Generated local demo",) if demo_output else ()) + ("Agent Monitor", "Live Coordination")
     default_view = views.index("Generated local demo") if demo_output else 0
     view = st.radio("Data view", views, index=default_view, horizontal=True)
     if view == "Agent Monitor":
@@ -781,6 +937,24 @@ def main() -> None:
         with st.expander("Scientific limitations"):
             st.caption("Water-quality/risk indicators do not diagnose CKDu or establish that water caused CKDu.")
             st.caption("The WQI uses the project's reduced parameter set; hotspot screening is provisional.")
+        return
+    if view == "Live Coordination":
+        monitor_dir = Path(simulation_run).expanduser() if simulation_run else None
+        if monitor_dir is not None:
+            st.caption("Configured run path: CKDU_SIMULATION_RUN_DIR. In Compose this is /app/simulation_run, mounted from CKDU_SIMULATION_RUN_HOST_DIR on the host.")
+        if hasattr(st, "fragment"):
+            @st.fragment(run_every=2)
+            def refresh_coordination():
+                _render_live_coordination(st, monitor_dir)
+            refresh_coordination()
+        else:
+            if st.button("Refresh Live Coordination"):
+                st.rerun()
+            _render_live_coordination(st, monitor_dir)
+        with st.expander("Scientific and operational limitations"):
+            st.caption("Water-quality/risk indicators do not diagnose CKDu or establish that water caused CKDu.")
+            st.caption("The WQI uses a reduced parameter set; hotspot screening is provisional. Missing and Unknown evidence remains unavailable.")
+            st.caption("Alert acknowledgements refer to the simulated inbox only, not an external health officer.")
         return
     if view == "Generated local demo":
         _render_local_demo(st, Path(demo_output))

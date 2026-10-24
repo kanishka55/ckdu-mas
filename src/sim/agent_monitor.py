@@ -25,6 +25,7 @@ class AgentMonitorSnapshot:
     last_activity: str | None
     agents: tuple[dict[str, Any], ...]
     lifecycle_events: tuple[dict[str, Any], ...]
+    timeline_events: tuple[dict[str, Any], ...]
     message_status: str
     messages: tuple[dict[str, Any], ...]
     message_counts: tuple[dict[str, Any], ...]
@@ -209,6 +210,9 @@ def derive_agent_states(events: Sequence[Mapping[str, Any]], messages: Sequence[
         phase_events = [row for row in agent_events if row.get("event_type") == "agent_phase"]
         latest_waiting = waiting_events[-1] if waiting_events else None
         latest_phase = phase_events[-1] if phase_events else None
+        phase_candidates = [row for row in agent_events
+                            if row.get("event_type") in {"agent_waiting", "agent_phase"}]
+        latest_behavior_phase = phase_candidates[-1] if phase_candidates else None
 
         state = "unknown"
         reason = "no lifecycle evidence"
@@ -231,15 +235,18 @@ def derive_agent_states(events: Sequence[Mapping[str, Any]], messages: Sequence[
                      (latest_waiting.get("event_seq", 0) if isinstance(latest_waiting.get("event_seq"), int) else 0)
                      > (latest_phase.get("event_seq", 0) if isinstance(latest_phase.get("event_seq"), int) else 0))
             )
-            if heartbeat_fresh and waiting_is_current:
+            if run_status == "running" and heartbeat_fresh and waiting_is_current:
                 state = "waiting"
                 reason = str(latest_waiting.get("phase", "workflow response"))
-            elif heartbeat_fresh and run_status == "running":
+            elif run_status == "running" and heartbeat_fresh:
                 state = "running"
                 reason = "recent per-agent heartbeat"
             elif last_heartbeat is None:
                 state = "unknown"
                 reason = "agent startup observed; per-agent heartbeat unavailable"
+            elif run_status != "running":
+                state = "unknown"
+                reason = "run is not active and this agent has no recorded work outcome"
             else:
                 state = "stale"
                 reason = "per-agent heartbeat is stale"
@@ -255,6 +262,9 @@ def derive_agent_states(events: Sequence[Mapping[str, Any]], messages: Sequence[
         last_seen: datetime | None = last_heartbeat
         if last_seen is None:
             last_seen = _parse_time(latest.get("timestamp"))
+        heartbeat_age = ((observed_now - last_heartbeat).total_seconds()
+                         if last_heartbeat is not None else None)
+        latest_failure = failures[-1] if failures else None
         sent = received = 0
         for message in messages:
             if message.get("direction") == "sent" and message.get("sender") == identity:
@@ -268,6 +278,15 @@ def derive_agent_states(events: Sequence[Mapping[str, Any]], messages: Sequence[
         record.pop("_events", None)
         output.append({"Component": record["Component"], "Identity": identity, "Status": state,
                        "Last observed": last_seen.isoformat() if last_seen else "Unavailable",
+                       "Latest heartbeat": last_heartbeat.isoformat() if last_heartbeat else "Unavailable",
+                       "Heartbeat age (s)": round(heartbeat_age, 2) if heartbeat_age is not None else None,
+                       "Latest phase": (latest_behavior_phase.get("phase")
+                                        or latest_behavior_phase.get("outcome")
+                                        or latest_behavior_phase.get("event_type")
+                                        if latest_behavior_phase else "Unavailable"),
+                       "Failure details": (latest_failure.get("reason") or latest_failure.get("outcome")
+                                           or latest_failure.get("event_type")
+                                           if latest_failure else "No failure recorded"),
                        "Sent messages": sent, "Received messages": received,
                        "Status evidence": reason})
     return tuple(sorted(output, key=lambda row: (row["Component"], row["Identity"])))
@@ -347,7 +366,7 @@ def load_agent_monitor(run_dir: str | Path, *, stale_after_s: float = 15.0,
         manifest: Mapping[str, Any] = parsed
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         return AgentMonitorSnapshot(root, "unavailable", "Unknown", "unknown", "unknown", None,
-                                    (), (), "unavailable", (), (), (), (), (), "unavailable",
+                                    (), (), (), "unavailable", (), (), (), (), (), "unavailable",
                                     (), "unavailable", (), "unavailable", (f"Run manifest unavailable: {exc}",))
 
     events, event_status, event_errors = read_event_journal(root / "agent_events.jsonl")
@@ -403,6 +422,13 @@ def load_agent_monitor(run_dir: str | Path, *, stale_after_s: float = 15.0,
     lifecycle = tuple(event for event in events
                       if str(event.get("event_type", "")).startswith("agent_")
                       and event.get("event_type") != "agent_heartbeat")
+    timeline = tuple(sorted(
+        events,
+        key=lambda event: (
+            _parse_time(event.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+            event.get("event_seq", 0) if isinstance(event.get("event_seq"), int) else 0,
+        ),
+    ))
     agents = derive_agent_states(events, messages, run_status=run_status, run_fresh=fresh,
                                  configured_agents=_configured_identities(manifest),
                                  now=current, stale_after_s=stale_after_s)
@@ -458,7 +484,7 @@ def load_agent_monitor(run_dir: str | Path, *, stale_after_s: float = 15.0,
                       for (sender, receiver), total in sorted(flows.items()))
     return AgentMonitorSnapshot(
         root, "available", manifest["run_id"], run_status, freshness,
-        last_activity_dt.isoformat() if last_activity_dt else None, agents, lifecycle,
+        last_activity_dt.isoformat() if last_activity_dt else None, agents, lifecycle, timeline,
         message_status, recent, count_rows, flow_rows,
         _month_progress(events, manifest), rounds, rounds_status,
         hotspots, f"{hotspots_status}: {hotspots_message}",

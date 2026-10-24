@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import csv
+import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
+from src.core import msg_log, ontology
+from src.sim.agent_monitor import load_agent_monitor
 from dashboard.app import (
     available_allocation_months,
     available_months,
@@ -18,6 +22,10 @@ from dashboard.app import (
     _show_demo_rows,
     load_local_demo_data,
     _render_evaluation_summary,
+    _live_coordination_model,
+    _render_live_coordination,
+    _render_live_coordination_snapshot,
+    _coordination_event_source,
 )
 
 
@@ -27,6 +35,160 @@ class TestDashboardData(unittest.TestCase):
             writer = csv.writer(handle)
             writer.writerow(columns)
             writer.writerows(rows)
+
+    def test_live_coordination_model_preserves_logged_fields_and_unavailable_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "run"
+            (root / "logs").mkdir(parents=True)
+            now = datetime.now(timezone.utc)
+            (root / "run_manifest.json").write_text(json.dumps({
+                "run_id": "live-view-fixture", "status": "running", "configuration": {},
+            }), encoding="utf-8")
+            events = [
+                {"event_type": "runner_heartbeat", "timestamp": now.isoformat(), "component": "SimulationRunner"},
+                {"event_type": "month_started", "timestamp": now.isoformat(), "component": "SimulationRunner",
+                 "month_index": 2},
+                {"event_type": "agent_started", "timestamp": now.isoformat(), "event_seq": 1,
+                 "component": "ClockAgent", "identity": "clock@localhost"},
+                {"event_type": "agent_heartbeat", "timestamp": now.isoformat(), "event_seq": 2,
+                 "component": "ClockAgent", "identity": "clock@localhost"},
+            ]
+            (root / "agent_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events),
+                                                      encoding="utf-8")
+            message_path = root / "logs/messages.csv"
+            body = {"type": "month_tick", "month_index": 2, "month": 12, "season": "Wet"}
+            msg_log.log_message("clock@localhost", "well@localhost", ontology.INFORM, "tick-2",
+                                ontology.encode(ontology.INFORM, body), "sent", path=message_path)
+            snapshot = load_agent_monitor(root, now=now)
+        model = _live_coordination_model(snapshot)
+        self.assertEqual(model["run_state"], "live")
+        self.assertEqual(model["current_month_index"], 2)
+        self.assertEqual(set(model["messages"][0]), set(msg_log.COLUMNS))
+        self.assertEqual(model["messages"][0]["thread_id"], "tick-2")
+        self.assertEqual(model["messages"][0]["direction"], "sent")
+        self.assertEqual(model["hotspots"], ())
+        self.assertIn("unavailable", model["hotspots_status"])
+        self.assertEqual(model["alerts"], ())
+        self.assertIn("unavailable", model["alerts_status"])
+
+    def test_live_coordination_renders_active_banner_timeline_and_message_fields(self) -> None:
+        class Box:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def metric(self, *_args, **_kwargs):
+                pass
+
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def __getattr__(self, name):
+                if name in {"subheader", "caption", "success", "warning", "error", "info", "markdown"}:
+                    return lambda value: self.calls.append((name, value))
+                raise AttributeError(name)
+
+            def dataframe(self, rows, **_kwargs):
+                self.calls.append(("dataframe", rows))
+
+            def columns(self, count):
+                return [Box() for _ in range(count)]
+
+            def expander(self, _label):
+                return Box()
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "run"
+            (root / "logs").mkdir(parents=True)
+            now = datetime.now(timezone.utc)
+            (root / "run_manifest.json").write_text(json.dumps({
+                "run_id": "render-live", "status": "running", "configuration": {},
+            }), encoding="utf-8")
+            events = [
+                {"event_type": "runner_heartbeat", "timestamp": now.isoformat(), "component": "SimulationRunner"},
+                {"event_type": "agent_started", "timestamp": now.isoformat(), "event_seq": 1,
+                 "component": "ClockAgent", "identity": "clock@localhost"},
+                {"event_type": "agent_heartbeat", "timestamp": now.isoformat(), "event_seq": 2,
+                 "component": "ClockAgent", "identity": "clock@localhost"},
+                {"event_type": "month_started", "timestamp": now.isoformat(), "component": "SimulationRunner",
+                 "month_index": 0},
+            ]
+            (root / "agent_events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events),
+                                                      encoding="utf-8")
+            body = {"type": "month_tick", "month_index": 0, "month": 10, "season": "Wet"}
+            msg_log.log_message("clock@localhost", "well@localhost", ontology.INFORM, "tick-0",
+                                ontology.encode(ontology.INFORM, body), "sent", path=root / "logs/messages.csv")
+            snapshot = load_agent_monitor(root, now=now)
+        recorder = Recorder()
+        _render_live_coordination_snapshot(recorder, snapshot)
+        self.assertTrue(any(kind == "success" and "Run active" in value for kind, value in recorder.calls))
+        tables = [rows for kind, rows in recorder.calls if kind == "dataframe"]
+        self.assertTrue(any(rows and "Event" in rows[0] for rows in tables))
+        self.assertTrue(any(rows and set(rows[0]) == set(msg_log.COLUMNS) for rows in tables))
+
+    def test_live_coordination_model_marks_completed_run_as_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "run_manifest.json").write_text(json.dumps({
+                "run_id": "completed-fixture", "status": "completed",
+            }), encoding="utf-8")
+            model = _live_coordination_model(load_agent_monitor(root))
+        self.assertEqual(model["run_state"], "completed snapshot")
+        self.assertEqual(model["run_status"], "completed")
+
+    def test_live_coordination_model_keeps_stale_failed_and_malformed_states_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            stale_dir = base / "stale"
+            failed_dir = base / "failed"
+            malformed_dir = base / "malformed"
+            for root in (stale_dir, failed_dir, malformed_dir):
+                (root / "logs").mkdir(parents=True)
+            (stale_dir / "run_manifest.json").write_text(
+                json.dumps({"run_id": "stale", "status": "running"}), encoding="utf-8")
+            (failed_dir / "run_manifest.json").write_text(
+                json.dumps({"run_id": "failed", "status": "failed"}), encoding="utf-8")
+            (malformed_dir / "run_manifest.json").write_text(
+                json.dumps({"run_id": "malformed", "status": "running"}), encoding="utf-8")
+            (malformed_dir / "agent_events.jsonl").write_text('{"event_type":\n', encoding="utf-8")
+            (malformed_dir / "logs/messages.csv").write_text("timestamp,sender\n", encoding="utf-8")
+            stale = _live_coordination_model(load_agent_monitor(stale_dir))
+            failed = _live_coordination_model(load_agent_monitor(failed_dir))
+            malformed = _live_coordination_model(load_agent_monitor(malformed_dir))
+        self.assertEqual(stale["run_state"], "stale")
+        self.assertEqual(failed["run_state"], "failed snapshot")
+        self.assertIn("Malformed event journal", " ".join(malformed["errors"]))
+        self.assertIn("Unexpected message-log columns", " ".join(malformed["errors"]))
+
+    def test_live_coordination_distinguishes_runner_observations_from_agent_behavior(self) -> None:
+        self.assertEqual(_coordination_event_source({
+            "event_type": "agent_started", "component": "ClockAgent",
+        }), "Runner lifecycle/work observation")
+        self.assertEqual(_coordination_event_source({
+            "event_type": "agent_waiting", "component": "ResourceCoordinatorAgent",
+        }), "Agent behavior event journal")
+        self.assertEqual(_coordination_event_source({
+            "event_type": "alert_outcome", "component": "AlertProcessingAgent",
+        }), "Runner observation / persisted stage result")
+
+    def test_live_coordination_without_configured_run_has_clear_state(self) -> None:
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def subheader(self, value):
+                self.calls.append(("subheader", value))
+
+            def info(self, value):
+                self.calls.append(("info", value))
+
+        st = Recorder()
+        _render_live_coordination(st, None)
+        self.assertEqual(st.calls[0], ("subheader", "Live Agent Coordination"))
+        self.assertIn("No simulation run is configured", st.calls[1][1])
 
     def test_demo_risk_index_and_allocation_month_stay_separate(self) -> None:
         data = load_dashboard_data()

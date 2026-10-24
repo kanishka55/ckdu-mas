@@ -246,6 +246,65 @@ class AgentMonitorParsingTests(unittest.TestCase):
             failed = load_agent_monitor(root, now=now)
             self.assertEqual(failed.freshness, "failed snapshot")
 
+    def test_live_snapshot_exposes_heartbeat_phase_and_new_events_on_reload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "logs").mkdir()
+            now = datetime.now(timezone.utc)
+            (root / "run_manifest.json").write_text(json.dumps({
+                "run_id": "refresh-test", "status": "running", "configuration": {},
+            }), encoding="utf-8")
+            event_path = root / "agent_events.jsonl"
+            initial = [
+                {"event_type": "runner_heartbeat", "timestamp": now.isoformat(), "component": "SimulationRunner"},
+                {"event_type": "agent_started", "timestamp": now.isoformat(), "event_seq": 1,
+                 "component": "ResourceCoordinatorAgent", "identity": "coord@localhost"},
+                {"event_type": "agent_heartbeat", "timestamp": now.isoformat(), "event_seq": 2,
+                 "component": "ResourceCoordinatorAgent", "identity": "coord@localhost"},
+                {"event_type": "agent_waiting", "timestamp": now.isoformat(), "event_seq": 3,
+                 "component": "ResourceCoordinatorAgent", "identity": "coord@localhost",
+                 "phase": "waiting_for_proposals", "thread_id": "round-1"},
+            ]
+            event_path.write_text("".join(json.dumps(event) + "\n" for event in initial), encoding="utf-8")
+            (root / "logs/messages.csv").write_text(",".join(msg_log.COLUMNS) + "\n", encoding="utf-8")
+            first = load_agent_monitor(root, now=now)
+            agent = first.agents[0]
+            self.assertEqual(agent["Status"], "waiting")
+            self.assertEqual(agent["Latest phase"], "waiting_for_proposals")
+            self.assertEqual(agent["Heartbeat age (s)"], 0)
+            self.assertEqual(first.timeline_events[-1]["event_type"], "agent_waiting")
+
+            next_event = {"event_type": "agent_phase", "timestamp": now.isoformat(), "event_seq": 4,
+                          "component": "ResourceCoordinatorAgent", "identity": "coord@localhost",
+                          "phase": "selecting_awards"}
+            with event_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(next_event) + "\n")
+            refreshed = load_agent_monitor(root, now=now)
+            self.assertEqual(len(refreshed.timeline_events), len(first.timeline_events) + 1)
+            self.assertEqual(refreshed.agents[0]["Latest phase"], "selecting_awards")
+            self.assertEqual(refreshed.agents[0]["Status"], "running")
+
+    def test_completed_snapshot_does_not_infer_active_agent_from_fresh_heartbeat(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "logs").mkdir()
+            now = datetime.now(timezone.utc)
+            (root / "run_manifest.json").write_text(json.dumps({
+                "run_id": "completed-without-agent-outcome", "status": "completed",
+            }), encoding="utf-8")
+            events = [
+                {"event_type": "runner_heartbeat", "timestamp": now.isoformat(), "component": "SimulationRunner"},
+                {"event_type": "agent_started", "timestamp": now.isoformat(), "component": "ClockAgent",
+                 "identity": "clock@localhost"},
+                {"event_type": "agent_heartbeat", "timestamp": now.isoformat(), "component": "ClockAgent",
+                 "identity": "clock@localhost"},
+            ]
+            (root / "agent_events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+            (root / "logs/messages.csv").write_text(",".join(msg_log.COLUMNS) + "\n", encoding="utf-8")
+            snapshot = load_agent_monitor(root, now=now)
+            self.assertEqual(snapshot.freshness, "completed snapshot")
+            self.assertEqual(snapshot.agents[0]["Status"], "unknown")
+
     def test_demo_provenance_file_is_not_accepted_as_simulation_run(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
