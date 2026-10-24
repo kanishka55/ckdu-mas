@@ -29,6 +29,7 @@ from dashboard.app import (
     _live_coordination_run_options,
     _selected_run_id,
     _lab_run_history_rows,
+    _status_callout,
 )
 
 
@@ -38,6 +39,28 @@ class TestDashboardData(unittest.TestCase):
             writer = csv.writer(handle)
             writer.writerow(columns)
             writer.writerows(rows)
+
+    def test_completed_with_expected_warmup_and_unavailable_evidence_has_clear_callout(self) -> None:
+        class Recorder:
+            def __init__(self):
+                self.warnings = []
+
+            def warning(self, text):
+                self.warnings.append(text)
+
+        recorder = Recorder()
+        decisions = {
+            "unavailable_explanations": ({"expected": True}, {"expected": True}),
+            "unavailable_stages": (),
+            "failures": (),
+            "evaluation_status": "unavailable",
+            "unavailable_metrics": ({"status": "unavailable"},),
+        }
+        _status_callout(recorder, "completed_with_unavailable_stages", "run-review", decisions)
+        self.assertEqual(len(recorder.warnings), 1)
+        self.assertIn("completed with unavailable stages", recorder.warnings[0])
+        self.assertIn("expected hotspot-history warm-up", recorder.warnings[0])
+        self.assertIn("evaluation metrics unavailable for missing evidence", recorder.warnings[0])
 
     def test_live_coordination_model_preserves_logged_fields_and_unavailable_stages(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
