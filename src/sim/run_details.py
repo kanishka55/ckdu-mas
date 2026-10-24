@@ -580,6 +580,7 @@ def _final_decisions(details: SimulationRunDetails) -> dict[str, Any]:
         "metric": row.get("metric", "Unknown metric"),
         "status": row.get("status", "unavailable"),
         "details": _explain_metric_unavailability(row.get("details")),
+        **_metric_availability_fields(row.get("details")),
     } for row in details.evaluation.rows
       if str(row.get("status", "")).casefold() in {"unavailable", "partial"})
     return {
@@ -611,6 +612,8 @@ def _explain_metric_unavailability(raw_details: Any) -> str:
             "No evaluator allocation input was supplied. Round awards are shown separately; comparisons also require verified baselines, population inputs, and an agreed risk-weight definition.",
         "baseline not verified":
             "The allocation baseline is not verified; no comparison is reported.",
+        "allocation rows are not attested as actual team results":
+            "Allocation rows are synthetic run evidence without team-output attestation; no comparison is reported.",
         "risk-input event selector is not supplied":
             "No agreed risk-input receipt selector was supplied for pairing arrivals with issued alerts.",
         "complete consistently threaded negotiation history is not confirmed":
@@ -621,6 +624,22 @@ def _explain_metric_unavailability(raw_details: Any) -> str:
             "No uniquely matched risk receipt and issued alert pair was recorded.",
     }
     return explanations.get(reason, f"Required evidence unavailable: {reason}.")
+
+
+def _metric_availability_fields(raw_details: Any) -> dict[str, str]:
+    """Expose evaluator-supplied guidance while keeping malformed details safe."""
+    try:
+        parsed = json.loads(raw_details) if isinstance(raw_details, str) else raw_details
+    except (TypeError, json.JSONDecodeError):
+        parsed = None
+    if not isinstance(parsed, Mapping):
+        return {"classification": "evidence", "missing_dependency": "metric evidence",
+                "required_action": "Review the documented metric inputs."}
+    return {
+        "classification": str(parsed.get("classification", "evidence")),
+        "missing_dependency": str(parsed.get("missing_dependency", "metric evidence")),
+        "required_action": str(parsed.get("required_action", "Review the documented metric inputs.")),
+    }
 
 
 def _unavailable_explanations(

@@ -54,15 +54,28 @@ all team components pass end to end.
   configured. Policy decisions, requested/sent/confirmed/failed delivery events,
   suppression, and unavailable results are recorded in isolated run output.
 - The evaluator reads the seven-column logger schema and validates typed
-  payloads. Alert latency requires a received `risk_record` and a sent `alert`
-  paired by exact `thread_id`, `ds_division`, and `month_index`. It does not
-  count suppressed decisions or infer pairs from file proximity. The current
-  risk and alert thread identifiers do not match, so latency remains
-  unavailable until the team agrees on and supplies a correlation convention.
-- Allocation comparisons remain unavailable unless the evaluator receives
-  the required allocation methods/baselines, population and risk-weight inputs,
-  an agreed risk-weight definition, and verified provenance. Local illustrative
-  allocation outputs are not team allocation results.
+  payloads. For live simulation runs, latency pairs a received risk record at
+  `AlertProcessingAgent` with a sent alert using the explicit bridge in the
+  emitted decision record: `alert_thread_id` links to `source_thread_id`,
+  `ds_division`, and `month_index`. It uses logger UTC append timestamps and
+  reports latency only for unique pairs. Missing or duplicate links remain
+  unavailable; it does not pair by file proximity. Older artifacts without
+  this bridge retain the exact-thread fallback, which remains unavailable
+  when alert and risk threads differ.
+- Risk-alignment evaluation remains unavailable. The available raw reference
+  datasets use prevalence classes and study-area aggregates; the repository
+  does not supply a sourced, approved division-to-WQI-tier mapping. A mapping
+  must be independently sourced and approved; model predictions cannot serve
+  as their own reference labels.
+- The runner exports only confirmed Contract Net awards to the evaluator's
+  existing schema: `month,resource,ds_division,round,winning_bid,method`.
+  Calendar `month` comes from the explicitly configured mapping. The manifest
+  labels these as synthetic run artifacts and records that no baselines or
+  team-output attestation were supplied. Population is taken from the
+  configured division input when present; comparisons remain unavailable until
+  comparable equal-split and first-come rows, required risk-weight inputs, and
+  an approved risk-weight definition are supplied. This export is not Member
+  C's output or a scientific result.
 - The dashboard keeps three sources separate: verified team output files,
   labelled illustrative test fixtures, and the generated local-demo bundle
   selected through `CKDU_DEMO_OUTPUT_DIR`. Missing or malformed files produce
@@ -84,15 +97,13 @@ all team components pass end to end.
 
 ### Known incompatibilities and smallest proposed fixes
 
-1. **Alert-latency correlation and timestamps remain unresolved.** The logger
-   distinguishes sent and received rows using `direction`, and its seven
-   columns must remain unchanged. Its timestamp is append time, not a
-   measurement timestamp. The evaluator currently pairs only exact
-   `thread_id`, division, and `month_index`; the current alert thread ID does
-   not match the risk-input thread ID. Agree on a shared correlation
-   convention and ensure risk receipt and alert issue timestamps have the
-   intended meaning before reporting latency. Do not infer correlation from
-   row proximity or sample-collection time.
+1. **Alert-latency meaning still needs team review.** The live runner has an
+   explicit decision-artifact bridge from alert thread to source risk thread,
+   division, and `month_index`; the evaluator selects the received risk event
+   at `AlertProcessingAgent` and the sent alert. Elapsed time uses logger UTC
+   append timestamps, so it measures logged arrival-to-issue time, not
+   sample-to-alert time. Members A/B should confirm that interval before
+   treating it as a finalized project metric.
 2. **Hotspot semantics remain provisional.** The live `hotspot_result`
    transport schema is implemented, but the local project-defined screening
    module is not validated epidemiological evidence. Member B should review its
@@ -105,10 +116,12 @@ all team components pass end to end.
    unavailable.
 4. **Allocation inputs and provenance are unresolved.** The local allocation
    engine is a deterministic illustrative adapter, not the original Member C
-   implementation or full FIPA exchange. Team allocation comparisons require
-   Member C outputs, baselines, population/risk inputs, an approved
-   risk-weight definition, and provenance. Until those are available, the
-   evaluator and dashboard keep allocation comparisons unavailable.
+   implementation or full FIPA exchange. The live runner exports its confirmed
+   Contract Net awards as synthetic run evidence. Comparisons require Member C
+   outputs or explicit run-specific provenance, equal-split and first-come
+   baselines, population/risk inputs, and an approved risk-weight definition.
+   The current export does not satisfy those comparison requirements, so the
+   evaluator and dashboard keep comparisons unavailable.
 5. **Team-generated output availability is distinct from source data.** The
    repository has synthetic seasonal readings and published/assumption-labelled
    division data, including approximate town coordinates. Those source files

@@ -463,6 +463,9 @@ def prepare_evaluation_display(
             return (f"Incomplete: invalid evaluation summary row {index}.", ())
 
         reason = ""
+        classification = ""
+        missing_dependency = ""
+        required_action = ""
         display_status = status
         if status != "unavailable" and value is None:
             display_status = "unavailable"
@@ -477,6 +480,9 @@ def prepare_evaluation_display(
                 parsed_details = json.loads(details)
                 if isinstance(parsed_details, dict):
                     reason = reason or str(parsed_details.get("reason", ""))
+                    classification = str(parsed_details.get("classification", ""))
+                    missing_dependency = str(parsed_details.get("missing_dependency", ""))
+                    required_action = str(parsed_details.get("required_action", ""))
             except (TypeError, json.JSONDecodeError):
                 return (f"Incomplete: invalid evaluation summary details at row {index}.", ())
         output.append({
@@ -487,6 +493,9 @@ def prepare_evaluation_display(
             "Status": display_status,
             "Observations": observations,
             "Details": reason,
+            "Availability type": classification or ("evidence" if display_status == "unavailable" else ""),
+            "Missing dependency": missing_dependency,
+            "Required action": required_action,
         })
     return f"Available: {len(output)} evaluation metric rows from {dataset.source_label}.", tuple(output)
 
@@ -1312,7 +1321,10 @@ def _render_final_decisions(st: Any, decisions: Mapping[str, Any], status: str) 
     if decisions["evaluation_status"] in {"unavailable", "empty", "incomplete"}:
         st.info(f"Evaluation metrics: {decisions['evaluation_status']}. Missing evidence is not reported as zero.")
     for metric in decisions["unavailable_metrics"]:
-        st.caption(f"Evaluation · {metric['metric']}: {metric['status']} — {metric['details']}")
+        st.caption(f"Evaluation · {metric['metric']}: {metric['status']} · {metric.get('classification', 'evidence')}")
+        st.write(f"Why: {metric['details']}")
+        st.caption(f"Missing: {metric.get('missing_dependency', 'metric evidence')}")
+        st.caption(f"Next: {metric.get('required_action', 'Review the documented metric inputs.')}")
 
 
 def _render_run_detail_page(st: Any, details: SimulationRunDetails, lab_root: Path,

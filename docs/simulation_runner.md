@@ -69,7 +69,13 @@ from confirmed awardees. The displayed ranking policy follows the current implem
 normalized by the maximum, ranked highest first, and ties are alphabetical by division name.
 Evaluation metrics are read from the run's
 `logs/evaluation_summary.csv`; allocation comparisons stay unavailable unless required provenance,
-baselines, population/risk inputs, and an approved risk-weight definition are available.
+baselines, population/risk inputs, and an approved risk-weight definition are available. Alert
+latency uses the explicit emitted-decision bridge from each unique `alert_thread_id` to its original
+`source_thread_id`, division, and `month_index`, and selects the received risk record at
+`AlertProcessingAgent`. The measured interval is between the logger's UTC append timestamps for
+that receipt and the sent alert; it is not a sample-collection-time metric. Runs without a unique
+bridge remain unavailable. The evaluator summary and manifest include the availability category,
+missing dependency, reason, and required action for unavailable metrics.
 
 ## Isolated outputs
 
@@ -94,9 +100,17 @@ non-empty target. Outputs include:
   domain calculations are correct, external XMPP is healthy, or a particular workflow stage
   succeeded. Event ordering uses `event_seq`; readers continue to accept legacy rows without it.
 - `logs/messages.csv`: the shared seven-column typed directional message log, isolated to this run.
+- `logs/allocations.csv`: confirmed Contract Net awards only, using the evaluator's existing
+  `month,resource,ds_division,round,winning_bid,method` schema. Calendar `month` is taken from
+  the explicitly configured map. The evaluator receives population values from the configured
+  division input when present. The manifest marks the awards as synthetic run evidence, with no
+  baselines and no team-output attestation; this export does not enable allocation comparisons.
 - `logs/risk_scores.csv` and `logs/well_scores.csv`: outputs from the existing risk output writer.
-- `logs/evaluation_summary.csv`: existing evaluator output. Missing references, baselines, and event
-  correlation remain unavailable.
+- `logs/evaluation_summary.csv`: existing evaluator output. Risk alignment remains unavailable
+  without an independent sourced reference-tier mapping. Allocation comparisons remain unavailable
+  without comparable baselines, population inputs, provenance, and an approved risk-weight formula.
+  Alert latency is available only when the persisted risk-to-alert bridge and unique message events
+  support a pair. Missing dependencies are not reported as zero.
 - `rounds/month_index_XXXX_round_N.json`: one result from the existing bounded SPADE coordinator per
   completed month.
 - `risk_records.json`, `hotspot_screening.json`, `alert_decisions.json`: typed risk records,

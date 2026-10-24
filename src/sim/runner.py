@@ -35,7 +35,7 @@ from src.core import contract_net, msg_log, ontology, risk_tiers, wells, wqi
 from src.core.hotspot_screening import ScreeningRule
 from src.sim import load_data, risk_outputs
 from src.sim.event_journal import append_event, register_run
-from src.sim.evaluate import evaluate
+from src.sim.evaluate import ALLOCATION_COLUMNS, evaluate
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT = ROOT / "data/processed/synthetic_wells.csv"
@@ -199,6 +199,58 @@ def _write_json_exclusive(path: Path, value: Any) -> None:
         stream.write("\n")
 
 
+def _write_confirmed_allocation_rows(
+    output_root: Path,
+    round_result_paths: Sequence[str],
+    calendar_month_by_index: Mapping[int, int],
+) -> Path:
+    """Export confirmed Contract Net awards in the evaluator's existing row schema.
+
+    This records outcomes from this synthetic run only. It does not create
+    equal-split/first-come baselines or attest scientific/team provenance.
+    """
+    path = output_root / "logs" / "allocations.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for relative in round_result_paths:
+        artifact = Path(relative)
+        if artifact.is_absolute() or ".." in artifact.parts:
+            raise ValueError("round result paths must remain inside the isolated run directory")
+        try:
+            result = json.loads((output_root / artifact).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot export allocation evidence from {relative}: {exc}") from exc
+        if not isinstance(result, Mapping):
+            raise ValueError(f"round result {relative} must contain a JSON object")
+        month_index, resource, round_number = result.get("month_index"), result.get("resource"), result.get("round")
+        if (isinstance(month_index, bool) or not isinstance(month_index, int)
+                or month_index not in calendar_month_by_index
+                or not isinstance(resource, str) or not resource
+                or isinstance(round_number, bool) or not isinstance(round_number, int)):
+            raise ValueError(f"round result {relative} has incomplete allocation identifiers")
+        awardees = result.get("selected_awardees")
+        if not isinstance(awardees, list):
+            raise ValueError(f"round result {relative} has no selected_awardees list")
+        for award in awardees:
+            if not isinstance(award, Mapping):
+                raise ValueError(f"round result {relative} contains a malformed award row")
+            if award.get("status") != "confirmed":
+                continue
+            division, bid = award.get("ds_division"), award.get("bid")
+            if not isinstance(division, str) or not division:
+                raise ValueError(f"round result {relative} has a confirmed award without ds_division")
+            if isinstance(bid, bool) or not isinstance(bid, (int, float)) or not math.isfinite(bid):
+                raise ValueError(f"round result {relative} has a confirmed award with invalid bid")
+            rows.append({"month": calendar_month_by_index[month_index], "resource": resource,
+                         "ds_division": division, "round": round_number,
+                         "winning_bid": bid, "method": "contract_net"})
+    with path.open("x", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=ALLOCATION_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
 def _rewrite_owned_json(path: Path, value: Any) -> None:
     """Refresh the run manifest that this invocation reserved with exclusive creation."""
     with path.open("w", encoding="utf-8", newline="\n") as stream:
@@ -309,6 +361,78 @@ def _has_unavailable_stages(*evidence_sections: Any) -> bool:
         return False
 
     return any(contains(section) for section in evidence_sections)
+
+
+def _has_complete_negotiation_history(
+    output_root: Path,
+    round_result_paths: Sequence[str],
+    month_status: Sequence[Mapping[str, Any]],
+    *,
+    recipient_count: int,
+    round_number: int,
+) -> bool:
+    """Attest complete round evidence before enabling evaluator negotiation metrics.
+
+    The evaluator still validates message threads and sent/received event identities. This
+    additional gate only confirms that every month with completed risk delivery has a persisted
+    round result with one response per configured recipient and no recorded missing, malformed,
+    unmatched, timed-out, or protocol-error evidence.
+    """
+    expected_months = {
+        item.get("month_index") for item in month_status
+        if item.get("risk_delivery") == "complete"
+    }
+    if not expected_months or not round_result_paths or len(round_result_paths) != len(expected_months):
+        return False
+    if (isinstance(recipient_count, bool) or not isinstance(recipient_count, int)
+            or recipient_count < 1):
+        return False
+
+    seen_months: set[int] = set()
+    for relative_path in round_result_paths:
+        path = Path(relative_path)
+        if path.is_absolute() or ".." in path.parts:
+            return False
+        try:
+            result = json.loads((output_root / path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(result, Mapping):
+            return False
+        month_index = result.get("month_index")
+        if month_index not in expected_months or month_index in seen_months:
+            return False
+        if result.get("round") != round_number or not result.get("thread_id"):
+            return False
+        if result.get("state_history", [])[-1:] != ["DONE"]:
+            return False
+        for field in ("missing_recipients", "timed_out_recipients", "malformed_replies",
+                      "unmatched_replies", "protocol_errors", "confirmation_timeouts"):
+            if result.get(field) != []:
+                return False
+
+        proposals = result.get("proposals")
+        refusals = result.get("refusals")
+        ineligible = result.get("ineligible_proposals")
+        if not all(isinstance(rows, list) for rows in (proposals, refusals, ineligible)):
+            return False
+        responders = [row.get("sender") for row in proposals + refusals + ineligible
+                      if isinstance(row, Mapping)]
+        if (len(responders) != len(proposals) + len(refusals) + len(ineligible)
+                or any(not isinstance(sender, str) or not sender for sender in responders)
+                or len(set(responders)) != recipient_count):
+            return False
+
+        awardees = result.get("selected_awardees")
+        if not isinstance(awardees, list) or any(
+            not isinstance(awardee, Mapping)
+            or awardee.get("status") not in {"confirmed", "failed"}
+            for awardee in awardees
+        ):
+            return False
+        seen_months.add(month_index)
+
+    return seen_months == expected_months
 
 
 async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
@@ -717,15 +841,44 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         _write_json_exclusive(output_root / "risk_records.json", risk_records)
         if config.hotspot_rule is None:
             manifest["stage_status"]["hotspot_screening"] = "unavailable_rule_not_configured"
+        allocation_path = _write_confirmed_allocation_rows(
+            output_root, manifest["round_result_paths"], config.calendar_month_by_index,
+        )
+        population_by_division = {
+            str(name): int(divisions_indexed.loc[name, "population"])
+            for name in divisions
+        }
+        manifest["allocation_evidence"] = {
+            "path": str(allocation_path.relative_to(output_root)),
+            "status": "confirmed_contract_net_rows_only",
+            "provenance": "synthetic local SPADE simulation; exported from persisted round artifacts",
+            "baselines_supplied": [],
+            "risk_weight_definition": None,
+            "population_source": str(config.divisions_path),
+            "team_output_attestation": False,
+        }
+
+        def alert_risk_receipt(event: Any) -> bool:
+            return (event.payload.get("type") == "risk_record"
+                    and event.receiver == alert_processor_jid)
+
         results = evaluate(
             messages_path=log_path,
-            allocations_path=output_root / "logs/allocations.csv",  # intentionally absent: no verified baseline bundle
+            allocations_path=allocation_path,
             output_path=output_root / "logs/evaluation_summary.csv",
             risk_records=risk_records or None,
+            population_by_village=population_by_division,
+            risk_input_selector=alert_risk_receipt,
+            alert_correlation_records=alert_agent.records if alert_agent else None,
+            negotiation_history_complete=_has_complete_negotiation_history(
+                output_root, manifest["round_result_paths"], months,
+                recipient_count=len(divisions), round_number=config.round_number,
+            ),
         )
         manifest["evaluation_status"] = {
             result.metric: {"status": result.status, "value": result.value,
-                            "unit": result.unit, "reason": result.details.get("reason")}
+                            "unit": result.unit, "reason": result.details.get("reason"),
+                            "availability": dict(result.details)}
             for result in results
         }
         manifest["message_counts"] = _read_message_counts(log_path)

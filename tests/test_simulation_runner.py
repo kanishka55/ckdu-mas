@@ -14,7 +14,9 @@ from src.core import msg_log, ontology
 from src.core.hotspot_screening import ScreeningRule
 from src.sim.runner import (
     SimulationConfig,
+    _has_complete_negotiation_history,
     _has_unavailable_stages,
+    _write_confirmed_allocation_rows,
     run_simulation,
     validate_output_dir,
 )
@@ -23,6 +25,76 @@ from src.sim.agent_monitor import read_event_journal
 
 
 class SimulationRunnerConfigurationTests(unittest.TestCase):
+    def test_allocation_export_contains_only_confirmed_awards_in_evaluator_schema(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "rounds").mkdir()
+            (root / "rounds/month_0.json").write_text(json.dumps({
+                "month_index": 0, "round": 2, "resource": "RO_unit",
+                "selected_awardees": [
+                    {"ds_division": "Alpha", "bid": 0.8, "status": "confirmed"},
+                    {"ds_division": "Beta", "bid": 0.4, "status": "failed"},
+                ],
+            }), encoding="utf-8")
+            path = _write_confirmed_allocation_rows(
+                root, ["rounds/month_0.json"], {0: 10},
+            )
+            with path.open(newline="", encoding="utf-8") as stream:
+                reader = csv.DictReader(stream)
+                self.assertEqual(reader.fieldnames, [
+                    "month", "resource", "ds_division", "round", "winning_bid", "method",
+                ])
+                rows = list(reader)
+            self.assertEqual(rows, [{
+                "month": "10", "resource": "RO_unit", "ds_division": "Alpha",
+                "round": "2", "winning_bid": "0.8", "method": "contract_net",
+            }])
+
+    def test_negotiation_history_is_attested_only_for_complete_round_artifacts(self):
+        complete = {
+            "month_index": 0, "round": 1, "thread_id": "round-0",
+            "state_history": ["IDLE", "CFP_SENT", "COLLECTING", "AWARDING", "CONFIRMING", "DONE"],
+            "proposals": [{"sender": "a@localhost"}],
+            "refusals": [{"sender": "b@localhost"}],
+            "ineligible_proposals": [], "missing_recipients": [],
+            "timed_out_recipients": [], "malformed_replies": [], "unmatched_replies": [],
+            "protocol_errors": [], "confirmation_timeouts": [],
+            "selected_awardees": [{"status": "confirmed"}],
+        }
+        months = [{"month_index": 0, "risk_delivery": "complete"}]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result_path = root / "rounds/round-0.json"
+            result_path.parent.mkdir()
+            result_path.write_text(json.dumps(complete), encoding="utf-8")
+            self.assertTrue(_has_complete_negotiation_history(
+                root, ["rounds/round-0.json"], months, recipient_count=2, round_number=1,
+            ))
+
+            for field, value in (
+                ("timed_out_recipients", ["b@localhost"]),
+                ("malformed_replies", [{"sender": "b@localhost"}]),
+                ("unmatched_replies", [{"sender": "b@localhost"}]),
+                ("protocol_errors", ["protocol issue"]),
+                ("confirmation_timeouts", ["a@localhost"]),
+                ("selected_awardees", [{"status": "unconfirmed_timeout"}]),
+            ):
+                with self.subTest(field=field):
+                    incomplete = {**complete, field: value}
+                    result_path.write_text(json.dumps(incomplete), encoding="utf-8")
+                    self.assertFalse(_has_complete_negotiation_history(
+                        root, ["rounds/round-0.json"], months,
+                        recipient_count=2, round_number=1,
+                    ))
+
+            result_path.write_text(json.dumps(complete), encoding="utf-8")
+            self.assertFalse(_has_complete_negotiation_history(
+                root, [], months, recipient_count=2, round_number=1,
+            ))
+            self.assertFalse(_has_complete_negotiation_history(
+                root, ["rounds/round-0.json"], months, recipient_count=3, round_number=1,
+            ))
+
     def test_success_status_is_based_on_recorded_stage_and_metric_evidence(self):
         complete = {
             "stage_status": {"risk_scoring": "complete", "hotspot_screening": "screening_outputs_recorded"},
@@ -323,6 +395,39 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
                 "consecutive_months": 2,
             })
             self.assertEqual(manifest["evaluation_status"]["allocation_efficiency"]["status"], "unavailable")
+            allocation_rows_path = output / "logs/allocations.csv"
+            self.assertTrue(allocation_rows_path.is_file())
+            with allocation_rows_path.open(newline="", encoding="utf-8") as stream:
+                allocation_reader = csv.DictReader(stream)
+                allocation_rows = list(allocation_reader)
+            self.assertEqual(allocation_reader.fieldnames,
+                             ["month", "resource", "ds_division", "round", "winning_bid", "method"])
+            self.assertTrue(all(row["method"] == "contract_net" for row in allocation_rows))
+            self.assertEqual(manifest["allocation_evidence"]["baselines_supplied"], [])
+            self.assertFalse(manifest["allocation_evidence"]["team_output_attestation"])
+            self.assertTrue(manifest["allocation_evidence"]["population_source"])
+            allocation_missing = manifest["evaluation_status"]["allocation_efficiency"]["availability"]["missing_dependencies"]
+            self.assertNotIn("division population mapping", allocation_missing)
+            self.assertTrue(any("equal_split" in item and "first_come" in item
+                                for item in allocation_missing))
+            self.assertEqual(manifest["evaluation_status"]["alert_latency"]["status"], "ok")
+            with (output / "logs/evaluation_summary.csv").open(newline="", encoding="utf-8") as stream:
+                evaluation_rows = list(csv.DictReader(stream))
+            latency_rows = [row for row in evaluation_rows if row["metric"] == "alert_latency"]
+            self.assertEqual(len(latency_rows), 1)
+            self.assertEqual(latency_rows[0]["status"], "ok")
+            self.assertEqual(latency_rows[0]["observations"], str(len(result["divisions"])))
+            self.assertGreater(float(latency_rows[0]["value"]), 0.0)
+            negotiation_rounds = [row for row in evaluation_rows
+                                  if row["metric"] == "negotiation_rounds"]
+            negotiation_messages = [row for row in evaluation_rows
+                                    if row["metric"] == "negotiation_logged_event_rows"]
+            self.assertEqual([(row["scope"], row["status"], row["value"])
+                              for row in negotiation_rounds],
+                             [("month_index=0", "ok", "1"), ("month_index=1", "ok", "1")])
+            self.assertEqual([(row["scope"], row["status"], row["value"])
+                              for row in negotiation_messages],
+                             [("month_index=0", "ok", "27"), ("month_index=1", "ok", "27")])
             self.assertNotIn("password", manifest["configuration"])
             self.assertTrue(all(event["event"] in {"started", "stopped"}
                                 for event in manifest["agent_lifecycle"]))

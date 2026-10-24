@@ -439,6 +439,21 @@ class TestDashboardData(unittest.TestCase):
         self.assertEqual(rows[0]["Status"], "unavailable")
         self.assertEqual(rows[0]["Details"], "no pair")
 
+    def test_evaluation_display_exposes_unavailable_metric_dependency_and_next_action(self) -> None:
+        dataset = Dataset(({
+            "metric": "risk_classification_alignment", "scope": "all", "value": "",
+            "unit": "proportion", "status": "unavailable", "observations": "0",
+            "details": json.dumps({"reason": "reference-to-tier mapping is not supplied",
+                                   "classification": "evidence",
+                                   "missing_dependency": "sourced reference-tier mapping",
+                                   "required_action": "Supply an independently sourced mapping."}),
+        },), "available", "1 row", "isolated run summary")
+        _, rows = prepare_evaluation_display(dataset)
+        self.assertEqual(rows[0]["Value"], "Unavailable")
+        self.assertEqual(rows[0]["Availability type"], "evidence")
+        self.assertEqual(rows[0]["Missing dependency"], "sourced reference-tier mapping")
+        self.assertIn("independently sourced", rows[0]["Required action"])
+
     def test_evaluation_display_handles_absent_empty_and_malformed_summaries(self) -> None:
         absent = Dataset((), "unavailable", "file not found", "Member D evaluation summary")
         empty = Dataset((), "empty", "No records", "Member D evaluation summary", (

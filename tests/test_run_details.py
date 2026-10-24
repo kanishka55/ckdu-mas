@@ -65,7 +65,10 @@ class SimulationRunDetailsTests(unittest.TestCase):
         self._write_csv(run_dir / "logs/evaluation_summary.csv",
                         ["metric", "scope", "value", "unit", "status", "observations", "details"],
                         [["allocation_efficiency", "all", "", "ratio", "unavailable", "0",
-                          '{"reason":"baseline not verified"}']])
+                          '{"reason":"allocation rows are not attested as actual team results",'
+                          '"classification":"provenance",'
+                          '"missing_dependency":"allocation provenance attestation; allocation baselines",'
+                          '"required_action":"Attest source rows and supply baselines."}']])
         control_path = lab / "control" / "run-fixture.json"
         control_path.write_text(json.dumps({"run_id": "run-fixture", "status": "completed",
                                             "run_dir": str(run_dir), "input_source": "synthetic fixture",
@@ -149,8 +152,11 @@ class SimulationRunDetailsTests(unittest.TestCase):
         self.assertEqual(view["decisions"]["alerts"][0]["delivery"], "confirmed")
         allocation_metric, = [item for item in view["decisions"]["unavailable_metrics"]
                               if item["metric"] == "allocation_efficiency"]
-        self.assertIn("baseline is not verified", allocation_metric["details"])
+        self.assertIn("without team-output attestation", allocation_metric["details"])
         self.assertNotIn("{\"reason\"", allocation_metric["details"])
+        self.assertEqual(allocation_metric["classification"], "provenance")
+        self.assertIn("allocation baselines", allocation_metric["missing_dependency"])
+        self.assertIn("supply baselines", allocation_metric["required_action"])
         village_card, = [row for row in view["agents"] if row["identity"] == "village@localhost"]
         self.assertEqual(village_card["latest_input"], "Waiting for input.")
         self.assertEqual(village_card["output_to"], "No output recipient/destination recorded.")

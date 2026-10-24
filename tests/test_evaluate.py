@@ -62,6 +62,8 @@ class TestEvaluationMetrics(unittest.TestCase):
         self.assertEqual(result.value, 1.0)
         self.assertEqual(result.observations, 1)
         self.assertEqual(result.details["unmatched_records"], 2)
+        self.assertIn("reference-tier labels", result.details["missing_dependency"])
+        self.assertTrue(result.details["required_action"])
 
     def test_invalid_risk_record_fails_loudly(self) -> None:
         with self.assertRaises(EvaluationInputError):
@@ -133,6 +135,95 @@ class TestEvaluationMetrics(unittest.TestCase):
         ambiguous = calculate_alert_latency(duplicated, lambda event: event.payload.get("type") == "risk_record")
         self.assertEqual(ambiguous.status, "unavailable")
         self.assertIn("ambiguous", ambiguous.details["reason"])
+
+    def test_alert_latency_uses_explicit_decision_bridge_for_distinct_alert_thread(self) -> None:
+        # Illustrative event rows model the persisted AlertProcessingAgent
+        # bridge: alert thread -> original source risk thread/division/month.
+        events = fixture_events()
+        source_thread = next(event.thread_id for event in events
+                             if event.payload.get("type") == "risk_record")
+        bridged = [
+            MessageEvent(event.timestamp, event.sender, event.receiver, event.performative,
+                         "alert:Fixture A:0:1" if event.payload.get("type") == "alert" else event.thread_id,
+                         event.payload, event.direction)
+            for event in events
+        ]
+        result = calculate_alert_latency(
+            bridged,
+            lambda event: (event.payload.get("type") == "risk_record"
+                           and event.receiver == "AlertAgent"),
+            alert_correlation_by_thread={"alert:Fixture A:0:1": [{
+                "source_thread_id": source_thread, "ds_division": "Fixture A", "month_index": 0,
+            }]},
+        )
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.value, 75.0)
+        self.assertIn("source_thread_id", result.details["pairing"])
+
+    def test_alert_latency_bridge_missing_event_is_unavailable(self) -> None:
+        events = [event for event in fixture_events() if event.payload.get("type") != "risk_record"]
+        alert = next(event for event in events if event.payload.get("type") == "alert")
+        result = calculate_alert_latency(
+            events, lambda event: event.receiver == "AlertProcessingAgent",
+            alert_correlation_by_thread={alert.thread_id: [{
+                "source_thread_id": "missing-risk-thread", "ds_division": "Fixture A", "month_index": 0,
+            }]},
+        )
+        self.assertEqual(result.status, "unavailable")
+        self.assertIsNone(result.value)
+        self.assertEqual(result.details["unmatched_alerts"], 1)
+
+    def test_alert_latency_bridge_duplicate_risk_receipts_are_ambiguous(self) -> None:
+        events = fixture_events()
+        risk = next(event for event in events if event.payload.get("type") == "risk_record"
+                    and event.direction == "received")
+        alert = next(event for event in events if event.payload.get("type") == "alert")
+        duplicate = events + [risk]
+        result = calculate_alert_latency(
+            duplicate,
+            lambda event: event.payload.get("type") == "risk_record",
+            alert_correlation_by_thread={alert.thread_id: [{
+                "source_thread_id": risk.thread_id, "ds_division": "Fixture A", "month_index": 0,
+            }]},
+        )
+        self.assertEqual(result.status, "unavailable")
+        self.assertIsNone(result.value)
+        self.assertEqual(result.details["ambiguous_pairs"], 1)
+
+    def test_alert_latency_bridge_conflicting_links_are_ambiguous(self) -> None:
+        alert = next(event for event in fixture_events() if event.payload.get("type") == "alert")
+        result = calculate_alert_latency(
+            fixture_events(), lambda event: event.payload.get("type") == "risk_record",
+            alert_correlation_by_thread={alert.thread_id: [
+                {"source_thread_id": "risk-a", "ds_division": "Fixture A", "month_index": 0},
+                {"source_thread_id": "risk-b", "ds_division": "Fixture A", "month_index": 0},
+            ]},
+        )
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(result.details["ambiguous_pairs"], 1)
+
+    def test_partial_alert_latency_explains_unmatched_issued_alerts(self) -> None:
+        events = fixture_events()
+        risk = next(event for event in events if event.payload.get("type") == "risk_record")
+        alert = next(event for event in events if event.payload.get("type") == "alert")
+        first_thread, second_thread = "alert:Fixture A:0:1", "alert:Fixture A:0:2"
+        changed = [MessageEvent(event.timestamp, event.sender, event.receiver, event.performative,
+                                first_thread if event.payload.get("type") == "alert" else event.thread_id,
+                                event.payload, event.direction)
+                   for event in events]
+        changed.append(MessageEvent(alert.timestamp, alert.sender, alert.receiver, alert.performative,
+                                    second_thread, alert.payload, "sent"))
+        result = calculate_alert_latency(
+            changed, lambda event: event.payload.get("type") == "risk_record",
+            alert_correlation_by_thread={
+                first_thread: [{"source_thread_id": risk.thread_id, "ds_division": "Fixture A", "month_index": 0}],
+                second_thread: [{"source_thread_id": "missing-thread", "ds_division": "Fixture A", "month_index": 0}],
+            },
+        )
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.value, 75.0)
+        self.assertEqual(result.details["unmatched_alerts"], 1)
+        self.assertIn("unique risk receipt", result.details["missing_dependency"])
 
     def test_latency_requires_received_risk_record_selector(self) -> None:
         events = fixture_events()
@@ -247,6 +338,25 @@ class TestEvaluatorInputsAndOutput(unittest.TestCase):
             with self.assertRaisesRegex(EvaluationInputError, "month, round and winning_bid"):
                 read_allocation_rows(malformed)
 
+    def test_evaluate_reports_malformed_allocation_input_without_exposing_exception_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            malformed = Path(temp) / "allocations.csv"
+            malformed.write_text(
+                ",".join(ALLOCATION_COLUMNS) + "\nmonth,bowser,A,1,not-a-number,contract_net\n",
+                encoding="utf-8",
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                results = evaluate(
+                    messages_path=Path(temp) / "missing_messages.csv",
+                    allocations_path=malformed,
+                    output_path=Path(temp) / "summary.csv",
+                )
+            metric = next(item for item in results if item.metric == "allocation_efficiency")
+            self.assertEqual(metric.status, "unavailable")
+            self.assertEqual(metric.details["classification"], "implementation")
+            self.assertIn("failed validation", metric.details["reason"])
+            self.assertNotIn("month, round and winning_bid", metric.details["reason"])
+
     def test_evaluate_writes_documented_summary_and_unavailable_empty_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "nested" / "evaluation_summary.csv"
@@ -277,6 +387,52 @@ class TestEvaluatorInputsAndOutput(unittest.TestCase):
             self.assertEqual(by_name["alert_latency"].value, 75.0)  # synthetic fixture correlation only
             self.assertEqual(by_name["allocation_efficiency"].status, "unavailable")
             self.assertTrue(all(item.status == "unavailable" for item in results if item.metric.startswith("negotiation_")))
+
+    def test_evaluate_exposes_actionable_unavailable_metric_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "summary.csv"
+            with contextlib.redirect_stdout(io.StringIO()):
+                results = evaluate(
+                    messages_path=Path(temp) / "absent_messages.csv",
+                    allocations_path=Path(temp) / "absent_allocations.csv",
+                    output_path=output,
+                    risk_records=fixture_records(),
+                )
+            risk = next(item for item in results if item.metric == "risk_classification_alignment")
+            self.assertEqual(risk.details["classification"], "evidence")
+            self.assertIn("reference-tier mapping", risk.details["missing_dependency"])
+            self.assertTrue(risk.details["required_action"])
+
+    def test_evaluate_accepts_alert_agent_decision_bridge_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            messages = Path(temp) / "messages.csv"
+            with (FIXTURES / "messages.csv").open(newline="", encoding="utf-8") as src:
+                rows = list(csv.DictReader(src))
+            risk_thread = next(row["thread_id"] for row in rows
+                               if json.loads(row["payload"]).get("type") == "risk_record")
+            alert_row = next(row for row in rows if json.loads(row["payload"]).get("type") == "alert")
+            alert_thread = "alert:Fixture A:0:1"
+            alert_row["thread_id"] = alert_thread
+            with messages.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+            with contextlib.redirect_stdout(io.StringIO()):
+                results = evaluate(
+                    messages_path=messages,
+                    allocations_path=Path(temp) / "absent_allocations.csv",
+                    output_path=Path(temp) / "summary.csv",
+                    risk_input_selector=lambda event: (
+                        event.payload.get("type") == "risk_record" and event.receiver == "AlertAgent"
+                    ),
+                    alert_correlation_records=[{
+                        "status": "emitted", "alert_thread_id": alert_thread,
+                        "source_thread_id": risk_thread, "ds_division": "Fixture A", "month_index": 0,
+                    }],
+                )
+            latency = next(item for item in results if item.metric == "alert_latency")
+            self.assertEqual(latency.status, "ok")
+            self.assertEqual(latency.value, 75.0)
 
 
 if __name__ == "__main__":

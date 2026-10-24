@@ -80,8 +80,41 @@ class AllocationRow:
     method: str
 
 
+def _availability_guidance(metric: str, reason: str) -> dict[str, str]:
+    """Give a concise, metric-specific account of why evidence is unavailable."""
+    if metric == "risk_classification_alignment":
+        if "reference" in reason:
+            return {"classification": "evidence", "missing_dependency": "sourced reference-tier mapping",
+                    "required_action": "Supply an independently sourced, team-approved division-to-tier mapping."}
+        return {"classification": "evidence", "missing_dependency": "valid risk records",
+                "required_action": "Produce typed risk records for the evaluation period."}
+    if metric.startswith("allocation") or metric.startswith("contract_net_minus_") or metric == "risk_weighted_population_served":
+        if "definition" in reason and "weight" in reason:
+            category, dependency, action = "configuration", "approved risk-weight definition", "Agree and document the risk-weight formula."
+        elif "population" in reason or "risk-weight mapping" in reason or "numeric risk-weight mapping" in reason:
+            category, dependency, action = "evidence", "population and division/month risk-weight inputs", "Supply sourced population and numeric risk-weight values for allocated divisions and months."
+        elif "attested" in reason or "verified" in reason:
+            category, dependency, action = "provenance", "allocation provenance", "Attest the origin and scope of the allocation rows."
+        elif "method" in reason or "baseline" in reason or "allocation" in reason or "rows" in reason:
+            category, dependency, action = "evidence", "comparable allocation rows and baselines", "Supply Contract Net, equal-split, and first-come rows for the same months and resources."
+        else:
+            category, dependency, action = "evidence", "allocation inputs", "Supply the required allocation evidence."
+        return {"classification": category, "missing_dependency": dependency, "required_action": action}
+    if metric == "alert_latency":
+        if "selector" in reason or "correlation" in reason or "ambiguous" in reason:
+            return {"classification": "configuration", "missing_dependency": "unambiguous risk-receipt to alert correlation",
+                    "required_action": "Provide a receiver-specific risk selector and explicit alert-to-source correlation records; do not pair by timestamp proximity."}
+        return {"classification": "evidence", "missing_dependency": "paired received-risk and sent-alert events",
+                "required_action": "Record both endpoints with a usable correlation link and timezone-aware logger timestamps."}
+    if metric.startswith("negotiation_"):
+        return {"classification": "evidence", "missing_dependency": "complete consistently threaded round history",
+                "required_action": "Persist complete CFP, response, award, and confirmation evidence for each evaluated round."}
+    return {"classification": "evidence", "missing_dependency": "metric-specific inputs", "required_action": "Supply the documented evidence required by this metric."}
+
+
 def _unavailable(metric: str, scope: str, unit: str, reason: str) -> MetricResult:
-    return MetricResult(metric, scope, None, unit, "unavailable", 0, {"reason": reason})
+    details = {"reason": reason, **_availability_guidance(metric, reason)}
+    return MetricResult(metric, scope, None, unit, "unavailable", 0, details)
 
 
 def _finite_number(value: Any, context: str) -> float:
@@ -216,16 +249,23 @@ def calculate_risk_alignment(
         matched += 1
         aligned += record["tier"] == expected
     if not matched:
+        reason = "no risk records matched reference divisions"
         return MetricResult(metric, "all", None, "proportion", "unavailable", 0,
-                            {"reason": "no risk records matched reference divisions",
+                            {"reason": reason, **_availability_guidance(metric, reason),
                              "unmatched_divisions": sorted(set(unmatched))})
-    return MetricResult(
-        metric, "all", aligned / matched, "proportion", "partial" if unmatched else "ok", matched,
-        {"aligned": aligned, "unmatched_records": len(unmatched),
-         "unmatched_divisions": sorted(set(unmatched)),
-         "interpretation": "alignment check only; not scientific validation or evidence of causation",
-         "reference_mapping_source": reference_mapping_source},
-    )
+    details: dict[str, Any] = {
+        "aligned": aligned, "unmatched_records": len(unmatched),
+        "unmatched_divisions": sorted(set(unmatched)),
+        "interpretation": "alignment check only; not scientific validation or evidence of causation",
+        "reference_mapping_source": reference_mapping_source,
+    }
+    if unmatched:
+        reason = "reference-tier mapping does not cover every evaluated division"
+        details.update({"reason": reason, **_availability_guidance(metric, reason),
+                       "missing_dependency": "reference-tier labels for: " + ", ".join(sorted(set(unmatched))),
+                       "required_action": "Supply sourced reference-tier labels for all unmatched divisions before interpreting full-coverage alignment."})
+    return MetricResult(metric, "all", aligned / matched, "proportion",
+                        "partial" if unmatched else "ok", matched, details)
 
 
 def calculate_allocation_efficiency(
@@ -244,21 +284,53 @@ def calculate_allocation_efficiency(
     provenance or scientific meaning.
     """
     metric = "allocation_efficiency"
-    reason = None
-    if not allocation_rows:
-        reason = "no allocation rows"
-    elif not allocation_results_verified:
-        reason = "allocation rows are not attested as actual team results"
-    elif not risk_weight_definition:
-        reason = "agreed numeric risk-weight definition is not supplied"
-    elif population_by_village is None or risk_weight_by_village_month is None:
-        reason = "population and numeric risk-weight mappings are required"
-    if reason:
-        return [_unavailable(metric, "all", "risk-weighted persons", reason)]
-
     groups: dict[tuple[int, str, str], set[str]] = defaultdict(set)
     for row in allocation_rows:
         groups[(row.month, row.resource, row.method)].add(row.ds_division)
+    missing: list[str] = []
+    if not allocation_rows:
+        missing.append("allocation rows")
+        reason = "no allocation rows"
+    else:
+        reason = "allocation rows are not attested as actual team results"
+        if not allocation_results_verified:
+            missing.append("allocation provenance attestation")
+        if not risk_weight_definition:
+            missing.append("approved numeric risk-weight definition")
+        if population_by_village is None:
+            missing.append("division population mapping")
+        if risk_weight_by_village_month is None:
+            missing.append("division/month risk-weight mapping")
+        missing_methods = sorted({
+            method for month, resource, _method in groups
+            for method in ALLOCATION_METHODS
+            if not groups.get((month, resource, method))
+        })
+        if missing_methods:
+            missing.append("allocation baseline method rows: " + ", ".join(missing_methods))
+        if allocation_results_verified and not missing_methods and risk_weight_definition \
+                and population_by_village is not None and risk_weight_by_village_month is not None:
+            reason = ""
+        elif not allocation_results_verified:
+            reason = "allocation rows are not attested as actual team results"
+        elif not risk_weight_definition:
+            reason = "agreed numeric risk-weight definition is not supplied"
+        elif population_by_village is None or risk_weight_by_village_month is None:
+            reason = "population and numeric risk-weight mappings are required"
+        elif missing_methods:
+            reason = "required allocation method rows are missing: " + ", ".join(missing_methods)
+    blocking_dependencies = [item for item in missing
+                             if not item.startswith("allocation baseline method rows:")]
+    if blocking_dependencies:
+        details = _availability_guidance(metric, reason)
+        details["missing_dependencies"] = missing
+        details["missing_dependency"] = "; ".join(missing)
+        details["required_action"] = (
+            "Supply or approve: " + "; ".join(missing) + "."
+        )
+        return [MetricResult(metric, "all", None, "risk-weighted persons", "unavailable", 0,
+                             {"reason": reason, **details})]
+
     month_resources = sorted({(month, resource) for month, resource, _ in groups})
     results: list[MetricResult] = []
     for month, resource in month_resources:
@@ -318,14 +390,17 @@ def calculate_allocation_efficiency(
 def calculate_alert_latency(
     events: Sequence[MessageEvent],
     risk_input_selector: Callable[[MessageEvent], bool] | None,
+    *,
+    alert_correlation_by_thread: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> MetricResult:
     """Mean logged seconds for uniquely correlated risk receipt/alert issue pairs.
 
-    Correlation requires matching ``thread_id``, ``ds_division`` and
-    ``month_index``. The input must be a received typed risk_record and the
-    endpoint a sent typed alert. No proximity or collection-time inference is
-    used. Suppression/unavailable decisions are not ontology messages and are
-    never counted.
+    By default correlation requires matching ``thread_id``, ``ds_division``
+    and ``month_index``. When supplied, ``alert_correlation_by_thread`` is an
+    explicit bridge from each alert thread to its source risk thread and
+    division/month, sourced from AlertProcessingAgent decision records. The
+    input must be a received typed risk_record and the endpoint a sent typed
+    alert. No proximity or collection-time inference is used.
     """
     metric = "alert_latency"
     if not events:
@@ -352,7 +427,23 @@ def calculate_alert_latency(
     latencies: list[float] = []
     unmatched = ambiguous = 0
     for key, alert_events in alerts.items():
-        input_events = inputs.get(key, [])
+        input_key = key
+        if alert_correlation_by_thread is not None:
+            links = alert_correlation_by_thread.get(key[0], ())
+            if len(links) != 1:
+                ambiguous += int(len(links) > 1)
+                unmatched += int(not links)
+                continue
+            link = links[0]
+            source_thread = link.get("source_thread_id")
+            division = link.get("ds_division")
+            month = link.get("month_index")
+            if (not isinstance(source_thread, str) or not source_thread
+                    or division != key[1] or month != key[2]):
+                ambiguous += 1
+                continue
+            input_key = (source_thread, division, month)
+        input_events = inputs.get(input_key, [])
         if len(alert_events) != 1 or len(input_events) > 1:
             ambiguous += 1
             continue
@@ -366,15 +457,25 @@ def calculate_alert_latency(
     if not latencies:
         reason = "no uniquely correlated risk receipt and sent alert" if not ambiguous else "ambiguous correlation keys"
         return MetricResult(metric, "all", None, "seconds", "unavailable", 0,
-                            {"reason": reason, "unmatched_alerts": unmatched,
+                            {"reason": reason, **_availability_guidance(metric, reason), "unmatched_alerts": unmatched,
                              "ambiguous_pairs": ambiguous, "suppression_events_counted": False})
+    details: dict[str, Any] = {
+        "unmatched_alerts": unmatched, "ambiguous_pairs": ambiguous,
+        "suppression_events_counted": False,
+        "pairing": ("alert_decisions source_thread_id + exact ds_division/month_index bridge; received risk_record to sent alert"
+                    if alert_correlation_by_thread is not None else
+                    "exact thread_id, ds_division and month_index; received risk_record to sent alert"),
+        "timestamp_basis": "message logger UTC append timestamps",
+    }
+    if unmatched or ambiguous:
+        reason = "some alert pairs were unmatched or ambiguous"
+        details.update({"reason": reason, **_availability_guidance(metric, reason),
+                        "missing_dependency": "unique risk receipt and alert pairs for every issued alert",
+                        "required_action": "Resolve missing or duplicate source links and rerun evaluation; ambiguous pairs are not counted."})
     return MetricResult(
         metric, "all", sum(latencies) / len(latencies), "seconds",
         "partial" if unmatched or ambiguous else "ok", len(latencies),
-        {"unmatched_alerts": unmatched, "ambiguous_pairs": ambiguous,
-         "suppression_events_counted": False,
-         "pairing": "exact thread_id, ds_division and month_index; received risk_record to sent alert",
-         "timestamp_basis": "message logger UTC append timestamps"},
+        details,
     )
 
 
@@ -496,6 +597,7 @@ def evaluate(
     population_by_village: Mapping[str, int] | None = None,
     risk_weight_by_village_month: Mapping[tuple[str, int], float] | None = None,
     risk_input_selector: Callable[[MessageEvent], bool] | None = None,
+    alert_correlation_records: Sequence[Mapping[str, Any]] | None = None,
     risk_records: Sequence[Mapping[str, Any]] | None = None,
     allocation_results_verified: bool = False,
     risk_weight_definition: str | None = None,
@@ -509,12 +611,28 @@ def evaluate(
     messages_missing = not Path(messages_path).is_file()
     allocations_missing = not Path(allocations_path).is_file()
     events = [] if messages_missing else read_message_events(messages_path)
-    allocations = [] if allocations_missing else read_allocation_rows(allocations_path)
+    allocation_input_invalid = False
+    if allocations_missing:
+        allocations = []
+    else:
+        try:
+            allocations = read_allocation_rows(allocations_path)
+        except EvaluationInputError:
+            allocations = []
+            allocation_input_invalid = True
     records = list(risk_records) if risk_records is not None else extract_risk_records(events)
 
     results = [calculate_risk_alignment(records, reference_tier_by_village)]
     if allocations_missing:
         results.append(_unavailable("allocation_efficiency", "all", "risk-weighted persons", "allocation log is missing"))
+    elif allocation_input_invalid:
+        reason = "allocation input or supporting values failed validation"
+        results.append(MetricResult(
+            "allocation_efficiency", "all", None, "risk-weighted persons", "unavailable", 0,
+            {"reason": reason, "classification": "implementation",
+             "missing_dependency": "valid allocation schema and complete finite supporting values",
+             "required_action": "Correct allocation columns/types and provide valid population and risk-weight inputs."},
+        ))
     else:
         try:
             results.extend(calculate_allocation_efficiency(
@@ -522,9 +640,34 @@ def evaluate(
                 allocation_results_verified=allocation_results_verified,
                 risk_weight_definition=risk_weight_definition,
             ))
-        except EvaluationInputError as exc:
-            results.append(_unavailable("allocation_efficiency", "all", "risk-weighted persons", str(exc)))
-    results.append(calculate_alert_latency(events, risk_input_selector))
+        except EvaluationInputError:
+            reason = "allocation input or supporting values failed validation"
+            results.append(MetricResult(
+                "allocation_efficiency", "all", None, "risk-weighted persons", "unavailable", 0,
+                {"reason": reason, "classification": "implementation",
+                 "missing_dependency": "valid allocation schema and complete finite supporting values",
+                 "required_action": "Correct allocation columns/types and provide valid population and risk-weight inputs."},
+            ))
+    correlations: dict[str, list[Mapping[str, Any]]] | None = None
+    if alert_correlation_records is not None:
+        correlations = defaultdict(list)
+        for record in alert_correlation_records:
+            if record.get("status") != "emitted":
+                continue
+            alert_thread = record.get("alert_thread_id")
+            source_thread = record.get("source_thread_id")
+            division, month = record.get("ds_division"), record.get("month_index")
+            if (not isinstance(alert_thread, str) or not alert_thread
+                    or not isinstance(source_thread, str) or not source_thread
+                    or not isinstance(division, str) or not division
+                    or isinstance(month, bool) or not isinstance(month, int)):
+                continue
+            correlations[alert_thread].append({"source_thread_id": source_thread,
+                                               "ds_division": division,
+                                               "month_index": month})
+    results.append(calculate_alert_latency(
+        events, risk_input_selector, alert_correlation_by_thread=correlations,
+    ))
     results.extend(calculate_negotiation_efficiency(events, history_complete=negotiation_history_complete))
     _write_summary(results, output_path)
     print_summary(results)
