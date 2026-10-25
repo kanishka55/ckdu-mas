@@ -16,3 +16,7 @@ logs/*.log
 .vscode/
 Thumbs.db
 desktop.ini
+
+# SPADE XMPP server state (`spade run`) and log lock files
+server.db*
+logs/*.lock

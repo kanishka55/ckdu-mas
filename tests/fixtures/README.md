@@ -1,12 +1,14 @@
 # Evaluation test fixtures
 
-Every file here is deterministic, illustrative test data. `Fixture A/B/C`, the
-risk weights, populations, expected tiers and allocation bids are invented
-test inputs; they are not measured observations, published findings, or
-scientific validation results. Risk records use `source="synthetic"`.
+Every file here is deterministic illustrative test data. Fixture divisions,
+risk records, weights, populations, expected tiers and allocation bids are not
+observations, actual team outputs, published findings, or scientific
+validation results.
 
-`messages.csv` includes an illustrative `event_type="risk_input_received"`
-marker solely to exercise the injected latency selector. That marker and its
-pairing with village/month are not yet part of the shared ontology. Alert rows
-follow the provisional alert and suppression schemas. Allocation rows follow
-Member C's documented CSV columns.
+`messages.csv` follows the current seven-column logger format and typed
+ontology. Its matching received `risk_record` and sent `alert` use the same
+thread only to test the evaluator's explicit correlation rule; this is not a
+claim that the running alert agent currently preserves that thread. The
+negotiation rows are similarly illustrative and may be counted only when a
+test explicitly declares the history complete. Allocation fixtures remain
+mechanics examples and are not treated as team results by default.

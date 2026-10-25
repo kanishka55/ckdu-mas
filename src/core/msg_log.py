@@ -1,130 +1,97 @@
-"""Append-only, process-safe CSV logging for agent messages.
+"""Append-only message log at logs/messages.csv. Feeds the evaluation metrics.
 
-Agents should call :func:`log_message` for sent messages and
-:func:`log_received_message` for received messages. Both event records use the
-required six-column format; no direction column is added because the project
-brief fixes the CSV schema exactly. Records are written once under an OS file
-lock, so multiple threads/processes can share one log path.
+Columns: timestamp, sender, receiver, performative, thread_id, payload, direction
+
+``direction`` is "sent" or "received". Both ends are logged so alert latency and negotiation timing
+can be measured; without it a sent row and its received row would be indistinguishable.
+
+Several agent processes write to the same file, so every write takes an exclusive lock file
+(``messages.csv.lock``) created atomically with O_EXCL, writes one row, flushes, and releases.
+
+Pure module: no SPADE imports. Agents pass plain strings.
 """
-
 from __future__ import annotations
 
 import csv
 import io
 import json
 import os
-from collections.abc import Mapping
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+COLUMNS = ["timestamp", "sender", "receiver", "performative", "thread_id", "payload", "direction"]
+DIRECTIONS = frozenset({"sent", "received"})
+DEFAULT_PATH = Path("logs") / "messages.csv"
 
-CSV_COLUMNS = ("timestamp", "sender", "receiver", "performative", "thread_id", "payload")
-DEFAULT_LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "messages.csv"
-
-
-def _lock(fd: int) -> None:
-    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
-        import msvcrt
-
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-    else:
-        import fcntl
-
-        fcntl.flock(fd, fcntl.LOCK_EX)
+LOCK_TIMEOUT_S = 10.0
+LOCK_STALE_S = 30.0
 
 
-def _unlock(fd: int) -> None:
-    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
-        import msvcrt
-
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-    else:
-        import fcntl
-
-        fcntl.flock(fd, fcntl.LOCK_UN)
+class LogLockTimeout(TimeoutError):
+    """Raised when the log lock cannot be taken within LOCK_TIMEOUT_S."""
 
 
-def _csv_line(values: tuple[str, ...]) -> bytes:
-    buffer = io.StringIO(newline="")
-    csv.writer(buffer, lineterminator="\n").writerow(values)
-    return buffer.getvalue().encode("utf-8")
-
-
-def _write_all(fd: int, data: bytes) -> None:
-    """Finish a locked append even if the OS reports a partial write."""
-    view = memoryview(data)
-    while view:
-        count = os.write(fd, view)
-        if count <= 0:
-            raise OSError("message log append made no progress")
-        view = view[count:]
+def _acquire(lock: Path) -> None:
+    deadline = time.monotonic() + LOCK_TIMEOUT_S
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return
+        except (FileExistsError, PermissionError):
+            # PermissionError: on Windows the lock is mid-delete by another process; retry.
+            # A crashed writer can leave the lock behind; break it once it is clearly stale.
+            try:
+                if time.time() - lock.stat().st_mtime > LOCK_STALE_S:
+                    lock.unlink(missing_ok=True)
+            except OSError:
+                pass  # lock vanished or is mid-delete; just retry
+            if time.monotonic() > deadline:
+                raise LogLockTimeout(f"could not lock {lock} within {LOCK_TIMEOUT_S}s")
+            time.sleep(0.005)
 
 
 def log_message(
     sender: str,
     receiver: str,
     performative: str,
-    thread_id: str,
-    payload: Mapping[str, Any],
-    log_path: str | os.PathLike[str] | None = None,
+    thread_id: str | None,
+    payload: str | dict[str, Any],
+    direction: str,
+    path: str | Path = DEFAULT_PATH,
 ) -> None:
-    """Append one sent-message event to the configured CSV log.
+    """Append one message row. ``payload`` may be the JSON body string or a dict."""
+    if direction not in DIRECTIONS:
+        raise ValueError(f"direction must be one of {sorted(DIRECTIONS)}, got {direction!r}")
+    if not isinstance(payload, str):
+        payload = json.dumps(payload, sort_keys=True)
 
-    ``log_path`` is injectable for tests and alternate runs. If omitted, the
-    path is ``logs/messages.csv`` at the repository root. The payload must be
-    a JSON-object mapping; validation against the ontology is the caller's
-    responsibility so the logger remains usable during schema integration.
-    """
-    _append(sender, receiver, performative, thread_id, payload, log_path)
+    row = [
+        datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        sender,
+        receiver,
+        performative,
+        thread_id or "",
+        payload,
+        direction,
+    ]
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\n").writerow(row)
+    line = buf.getvalue()
 
-
-def log_received_message(
-    sender: str,
-    receiver: str,
-    performative: str,
-    thread_id: str,
-    payload: Mapping[str, Any],
-    log_path: str | os.PathLike[str] | None = None,
-) -> None:
-    """Append one received-message event using the same fixed CSV contract."""
-    _append(sender, receiver, performative, thread_id, payload, log_path)
-
-
-def _append(
-    sender: str,
-    receiver: str,
-    performative: str,
-    thread_id: str,
-    payload: Mapping[str, Any],
-    log_path: str | os.PathLike[str] | None,
-) -> None:
-    for name, value in (
-        ("sender", sender),
-        ("receiver", receiver),
-        ("performative", performative),
-        ("thread_id", thread_id),
-    ):
-        if not isinstance(value, str):
-            raise TypeError(f"{name} must be a string")
-    if not isinstance(payload, Mapping):
-        raise TypeError("payload must be a mapping / JSON object")
-    payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    path = Path(log_path) if log_path is not None else DEFAULT_LOG_PATH
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o644)
+    lock = path.with_name(path.name + ".lock")
+    _acquire(lock)
     try:
-        _lock(fd)
-        try:
-            if os.fstat(fd).st_size == 0:
-                _write_all(fd, _csv_line(CSV_COLUMNS))
-            timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-            row = (timestamp, sender, receiver, performative, thread_id, payload_text)
-            data = _csv_line(row)
-            _write_all(fd, data)
-        finally:
-            _unlock(fd)
+        new_file = not path.exists() or path.stat().st_size == 0
+        with open(path, "a", encoding="utf-8", newline="") as fh:
+            if new_file:
+                fh.write(",".join(COLUMNS) + "\n")
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
     finally:
-        os.close(fd)
+        lock.unlink(missing_ok=True)

@@ -8,6 +8,43 @@ resource pool, with logged messages and a measurable advantage over naive baseli
 
 ---
 
+## 0. Status as of 2026-10-17: what A and B already deliver
+
+Parts A and B are built and tested together (`pytest`: 101 passed). You can build on them now.
+
+| Already working | Owner | What it gives you |
+|---|---|---|
+| `WellMonitorAgent` (`src/agents/well_monitor.py`) | A | On each month tick, sends `well_readings` per village to RiskScoring |
+| `RiskScoringAgent` (`src/agents/risk_scoring.py`) | B | Sends one `risk_record` per village per month to its subscribers, **including you** |
+| `VillageAgent` × 11 (`src/agents/village.py`) | A | Holds its own wells only, answers your `cfp` with `propose` or `refuse`, answers `accept-proposal` with `inform` |
+| `bidding.normalise_bids` / `rank_bids` (`src/core/bidding.py`) | A | Scale raw bids to [0, 1]; rank with the alphabetical tie-break |
+| `common.send` / `common.receive` (`src/agents/common.py`) | A/D | Send/receive with ontology validation, a timeout, and logging to `logs/messages.csv` |
+| Toy demo `src/sim/demo_contract_net.py` | C | 1 coordinator + 3 villages, one round: **done, runs end to end** |
+
+**How villages decide (changed 2026-10-17):**
+- A village **refuses** with `"no need this month (tier Good)"` when its tier is Excellent or Good,
+  and bids only when it is Poor, Very Poor or Unsuitable (`bidding.has_need`). The boundary is the
+  published WQI class limit (100) from ckdu_02. With the current synthetic data about 4 of 11 villages
+  bid each month, so `refuse` shows up in the log as the brief requires.
+- It also refuses with `"no risk indicator available this month"` when it has no WQI yet.
+- The bid is `risk × population` (risk = village WQI). **Distance is no longer in the bid.**
+  Delivery cost is yours to apply (see section 3).
+
+**Run what exists (Windows: always use `--embedded-server`, see `docs/known_issues.md`):**
+```
+python -m src.sim.demo_contract_net --embedded-server   # your toy demo
+python -m src.sim.demo_f1_f2 --embedded-server          # A + B chain, all 11 villages answer a probe CFP
+pytest
+```
+Agents currently cannot log in to an external `spade run` server on Windows. Until that is fixed,
+everything runs in one process with the embedded server.
+
+**Still yours to build:** `allocation.py` with the three allocators, `ResourceCoordinatorAgent`
+(state machine, multi-round, `failure` + re-offer), `ClockAgent` (the demos use a stub clock),
+`runner.py`, `config.py`, and `logs/allocations.csv`.
+
+---
+
 ## 1. Files you own
 
 | File | What it does |
@@ -35,6 +72,8 @@ Coordinator                               VillageAgents (11)
 
 - `refuse` is not optional. A village with no need that month must refuse, and that must show up in
   the log — it is evidence the agents are autonomous rather than always bidding.
+  **Implemented on the village side:** tier Excellent/Good, or no WQI, means refuse. A village that
+  does not answer before the CFP deadline must still be treated as a refuse by the coordinator, and logged.
 - `failure` is not optional either. Model at least one case where an accepted village cannot take
   delivery, and re-offer to the next-best bidder. That is what makes it a negotiation and not a
   ranked list.
@@ -53,6 +92,10 @@ about **50%** used RO-treated water. Use that to justify RO units as the contest
 argue your pool size, rather than picking a number out of the air. Put the justification in
 `src/sim/config.py` as a comment **and** in your report section.
 
+The following resource differences are design targets from the original task specification, not a
+claim about the current coordinator. The current coordinator ranks `risk × population` bids for its
+configured resource and has no distance-based delivery-cost calculation.
+
 Model the two resources differently — that is where the interesting negotiation lives:
 
 | Resource | Character |
@@ -60,19 +103,26 @@ Model the two resources differently — that is where the interesting negotiatio
 | **RO unit** | Durable, high value, serves a village for many months once placed. Allocate few, rarely. |
 | **Water bowser** | Recurring monthly trips, cost scales with `distance_to_depot_km`. Allocate several, every month. |
 
+**Current implementation status:** since 2026-10-17 the village bid no longer divides by distance
+(that made remote at-risk villages bid lowest). The current `VillageAgent` retains
+`distance_to_depot_km` as metadata, but neither village bids nor `ResourceCoordinatorAgent`
+ranking use it; no bowser trip-cost calculation is implemented. This older task's request to apply
+distance as a bowser cost remains unimplemented and does not define an agreed cost formula. Do not
+assume distance affects current allocation results or introduce a formula without team agreement.
+
 ## 4. Tasks
 
 ### Week 1–2 — toy demo (part of the shared foundation, pair with D on the logger)
 
-- [ ] `src/sim/demo_contract_net.py`: 1 coordinator + 3 villages, hard-coded bids, one round.
-- [ ] Runs end to end over SPADE's built-in XMPP server and **writes `logs/messages.csv`**.
-- [ ] Verify and record the exact commands in `CLAUDE.md`:
+- [x] `src/sim/demo_contract_net.py`: 1 coordinator + 3 villages, hard-coded bids, one round.
+- [x] Runs end to end over SPADE's built-in XMPP server and **writes `logs/messages.csv`**.
+- [x] Verify and record the exact commands in `CLAUDE.md`:
       ```
-      spade run                              # terminal 1, leave running
-      python -m src.sim.demo_contract_net    # terminal 2
+      python -m src.sim.demo_contract_net --embedded-server
       ```
-- [ ] On Windows, SPADE + asyncio is the most likely place to lose a day. If it fights you, run it
-      under WSL (Ubuntu) as START_HERE suggests, and tell the team which you used.
+- [ ] On Windows, agents cannot log in to an external `spade run` server yet (`docs/known_issues.md`).
+      The one-process-per-agent design needs it, so fix it (or move to WSL / Prosody) before week 9,
+      and tell the team which you used.
 
 ### Week 3–4 — the CFP state machine
 
@@ -103,16 +153,25 @@ In `allocation.py`, three pure functions over the same inputs so they are direct
 
 ## 5. Interfaces
 
+These match `src/core/ontology.py` as of 2026-10-17. The ontology is the source of truth; if this
+section and the ontology disagree, the ontology wins.
+
 ```python
 # you consume
-bid(risk, population, distance_to_depot_km) -> float      # from A
-risk_record = {"ds_division", "month", "wqi", "tier", ...} # from B
-log_message(...)                                           # from D
+bid(risk, population) -> float              # from A; villages compute it, you receive it in `propose`
+has_need(tier) -> bool                      # from A; True only for Poor / Very Poor / Unsuitable
+normalise_bids(raw) / rank_bids(bids)       # from A; scale to [0, 1], alphabetical tie-break
+risk_record = {"type": "risk_record", "month_index": int, "ds_division": str,
+               "wqi": float | None, "tier": str, "drivers": list}           # from B
+propose = {"type": "propose", "month_index", "round", "ds_division",
+           "bid": float, "risk_tier": str, "population": int}             # from villages
+refuse  = {"type": "refuse", "month_index", "round", "ds_division", "reason": str}
+log_message(...)                            # from D; common.send / common.receive call it for you
 
 # you publish — cfp payload (JSON, schema in src/core/ontology.py)
-{"performative": "cfp", "thread": str, "month": int,
- "resource": "ro_unit" | "bowser", "n_available": int,
- "round": int, "deadline_s": float}
+{"type": "cfp", "month_index": int, "round": int,
+ "resource": "RO_unit" | "bowser", "units_available": int, "deadline_s": float}
+# the thread id travels as the SPADE message thread, not inside the body
 
 # you publish — logs/allocations.csv
 month, resource, ds_division, round, winning_bid, method   # method: contract_net | equal_split | first_come
@@ -133,9 +192,10 @@ month, resource, ds_division, round, winning_bid, method   # method: contract_ne
 
 ```
 pytest -q
-spade run                              # terminal 1
-python -m src.sim.demo_contract_net    # terminal 2
+python -m src.sim.demo_contract_net --embedded-server
 ```
+(Once the external-server issue is fixed: `spade run --host localhost --memory` in terminal 1, then
+the demo without `--embedded-server` in terminal 2.)
 Then show `logs/messages.csv` — the actual rows, with all six performatives present. Show the
 command and its output, not a claim that it works.
 
