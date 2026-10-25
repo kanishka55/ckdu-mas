@@ -1,0 +1,62 @@
+{
+  "allocation_metric_results": "unavailable: illustrative local allocations are not evaluator team allocation inputs",
+  "artifacts": {
+    "alerts": "alerts.csv",
+    "allocations": "allocation_decisions.csv",
+    "division_points": "division_points.csv (published approximate division-town coordinates)",
+    "evaluation_summary": "logs/evaluation_summary.csv",
+    "hotspots": "hotspot_screening.csv",
+    "messages": "logs/messages.csv",
+    "risk_scores": "logs/risk_scores.csv",
+    "well_scores": "logs/well_scores.csv"
+  },
+  "configuration": {
+    "months": 12,
+    "resource": "RO_unit",
+    "resource_pool_size": 3,
+    "rho_assumption_from_generator": 0.6,
+    "start_calendar_month": 10
+  },
+  "created_at_utc": "2026-10-20T17:57:17.162242+00:00",
+  "policies": {
+    "alert": "current approved wording only; Very Poor, Unsuitable and Unknown remain unavailable",
+    "allocation": {
+      "bid": "existing demo engine WQI \u00d7 population",
+      "first_come_order": "provisional alphabetical synthetic order",
+      "implementation": "local illustrative Contract Net-style ranking; not Member C code",
+      "tie_break": "alphabetical DS division"
+    },
+    "hotspot": {
+      "consecutive_months": 2,
+      "rule_id": "demo_configured_tier_persistence_v1",
+      "status": "project-defined illustrative screening, not validated epidemiology",
+      "trigger_tiers": [
+        "Poor",
+        "Unsuitable",
+        "Very Poor"
+      ]
+    }
+  },
+  "provenance": "illustrative_local_demo",
+  "scientific_disclaimer": "Water-quality/risk indicators do not diagnose CKDu or establish causation.",
+  "scoring": {
+    "implementation": "existing src.core.wqi and src.core.risk_tiers",
+    "limitation": "reduced-parameter WQI; not directly comparable to 13-parameter published WQI",
+    "status": "available"
+  },
+  "stages": {
+    "alerts": "generated only when risk record and hotspot bool are available",
+    "allocation": "available",
+    "evaluation": "written with unsupported mappings, correlation and allocation attestations omitted",
+    "hotspot": "generated with explicit configured rule; unavailable records retained",
+    "population": "available",
+    "risk_scoring": "available"
+  },
+  "synthetic_input": {
+    "monthly_expansion": "seasonal values repeated by existing MONTH_TO_SEASON rule; not new measurements",
+    "path": "/app/data/processed/synthetic_wells.csv",
+    "preflight_status": "available",
+    "rows": 440,
+    "source": "synthetic"
+  }
+}

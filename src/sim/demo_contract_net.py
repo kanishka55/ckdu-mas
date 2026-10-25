@@ -31,6 +31,7 @@ from src.sim.load_data import load_ds_divisions
 DOMAIN = "localhost"
 PASSWORD = "demo"
 DEMO_VILLAGES = ["Padaviya", "Medawachchiya", "Mihintale"]
+DEMO_MONTH_INDEX = 0
 STUB_RISK = {  # STUB placeholder (WQI-scale risk, tier) per village, not real scores
     "Padaviya": (140.0, "Poor"),
     "Medawachchiya": (120.0, "Poor"),
@@ -39,6 +40,31 @@ STUB_RISK = {  # STUB placeholder (WQI-scale risk, tier) per village, not real s
 CFP_DEADLINE_S = 5.0
 INFORM_WAIT_S = 5.0
 UNITS_AVAILABLE = 1  # scarce: one RO unit for three villages
+
+
+def configure_stub_risk(village: VillageAgent, name: str) -> None:
+    """Set illustrative risk for the same simulated month used by this toy CFP."""
+    risk, tier = STUB_RISK[name]
+    village.set_risk(risk, tier, month_index=DEMO_MONTH_INDEX)
+
+
+def select_winners(proposals: dict[str, tuple[str, float]]) -> tuple[list, list[str]]:
+    """Rank received proposals and choose at most the toy round's available units."""
+    ranked = bidding.rank_bids(
+        bidding.normalise_bids({name: bid for name, (_, bid) in proposals.items()})
+    )
+    winners = sorted(name for name, _ in ranked[:UNITS_AVAILABLE])
+    return ranked, winners
+
+
+def require_successful_round(result: dict) -> None:
+    """Prevent a silent-success demo run when no proposal or award was completed."""
+    if not result.get("ranked"):
+        raise RuntimeError("toy Contract Net round received no valid proposals")
+    if not result.get("winners"):
+        raise RuntimeError("toy Contract Net round made no award")
+    if not result.get("confirmed"):
+        raise RuntimeError("toy Contract Net award was not confirmed")
 
 
 class ToyCoordinator(Agent):
@@ -51,7 +77,7 @@ class ToyCoordinator(Agent):
         async def run(self):
             agent: ToyCoordinator = self.agent
             thread = f"cn-{uuid.uuid4().hex[:8]}"
-            cfp = {"type": "cfp", "month_index": 0, "round": 1, "resource": "RO_unit",
+            cfp = {"type": "cfp", "month_index": DEMO_MONTH_INDEX, "round": 1, "resource": "RO_unit",
                    "units_available": UNITS_AVAILABLE, "deadline_s": CFP_DEADLINE_S}
             for v in agent.villages:
                 await common.send(self, v, ontology.CFP, cfp, thread)
@@ -71,18 +97,16 @@ class ToyCoordinator(Agent):
                 if perf == ontology.PROPOSE:
                     proposals[body["ds_division"]] = (str(msg.sender), body["bid"])
 
-            ranked = bidding.rank_bids(
-                bidding.normalise_bids({k: b for k, (_, b) in proposals.items()})
-            )
-            winners = {name for name, _ in ranked[:UNITS_AVAILABLE]}
+            ranked, winner_names = select_winners(proposals)
+            winners = set(winner_names)
             for name, (jid, _) in proposals.items():
                 if name in winners:
                     await common.send(self, jid, ontology.ACCEPT_PROPOSAL, {
-                        "type": "accept_proposal", "month_index": 0, "round": 1,
+                        "type": "accept_proposal", "month_index": DEMO_MONTH_INDEX, "round": 1,
                         "resource": "RO_unit", "units": 1}, thread)
                 else:
                     await common.send(self, jid, ontology.REJECT_PROPOSAL, {
-                        "type": "reject_proposal", "month_index": 0, "round": 1,
+                        "type": "reject_proposal", "month_index": DEMO_MONTH_INDEX, "round": 1,
                         "reason": "higher-need bid selected for the available unit"}, thread)
 
             confirmed = []
@@ -91,7 +115,7 @@ class ToyCoordinator(Agent):
                 got = await common.receive(self, timeout=deadline - time.monotonic())
                 if got and got[2]["type"] == "inform_done":
                     confirmed.append(got[2]["ds_division"])
-            agent.result = {"ranked": ranked, "winners": sorted(winners),
+            agent.result = {"ranked": ranked, "winners": winner_names,
                             "confirmed": confirmed, "no_reply": sorted(set(agent.villages) - replied)}
 
     async def setup(self):
@@ -106,22 +130,30 @@ async def main() -> None:
         v = VillageAgent(f"village_{name.lower()}@{DOMAIN}", PASSWORD, ds_division=name,
                          population=int(row["population"]),
                          distance_to_depot_km=float(row["distance_to_depot_km"]))
-        v.set_risk(*STUB_RISK[name])
+        configure_stub_risk(v, name)
         villages.append(v)
-    for v in villages:
-        await v.start(auto_register=True)
-
     coord = ToyCoordinator(f"coordinator@{DOMAIN}", PASSWORD, [str(v.jid) for v in villages])
-    await coord.start(auto_register=True)
-    behaviour = next(iter(coord.behaviours))
-    await asyncio.wait_for(behaviour.join(), timeout=CFP_DEADLINE_S + INFORM_WAIT_S + 15)
+    started = []
+    try:
+        for v in villages:
+            started.append(v)
+            await v.start(auto_register=True)
+        started.append(coord)
+        await coord.start(auto_register=True)
+        behaviour = next(iter(coord.behaviours))
+        await asyncio.wait_for(behaviour.join(), timeout=CFP_DEADLINE_S + INFORM_WAIT_S + 15)
 
-    print("ranked (normalised):", coord.result["ranked"])
-    print("winners:", coord.result["winners"], "confirmed:", coord.result["confirmed"],
-          "no reply:", coord.result["no_reply"])
-    await coord.stop()
-    for v in villages:
-        await v.stop()
+        require_successful_round(coord.result)
+        print("ranked (normalised):", coord.result["ranked"])
+        print("winners:", coord.result["winners"], "confirmed:", coord.result["confirmed"],
+              "no reply:", coord.result["no_reply"])
+    finally:
+        stopped = await asyncio.gather(
+            *(agent.stop() for agent in reversed(started)), return_exceptions=True
+        )
+        for agent, result in zip(reversed(started), stopped):
+            if isinstance(result, BaseException):
+                print(f"failed to stop {agent.jid}: {result}")
 
 
 if __name__ == "__main__":

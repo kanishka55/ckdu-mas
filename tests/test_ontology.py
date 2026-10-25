@@ -54,6 +54,28 @@ def test_risk_record_allows_null_wqi():
                                         "tier": "unknown", "drivers": []})
 
 
+def test_hotspot_result_and_alert_ack_are_strict_typed_contracts():
+    hotspot = {"type": "hotspot_result", "month_index": 2, "ds_division": "Demo",
+               "status": "unavailable", "rule_id": "demo-rule",
+               "evidence_month_indexes": [1, 2], "reason": "unknown_risk"}
+    encoded = ontology.encode(ontology.INFORM, hotspot)
+    assert ontology.decode(ontology.INFORM, encoded) == hotspot
+    ack = {"type": "alert_ack", "month_index": 2, "ds_division": "Demo"}
+    assert ontology.decode(ontology.INFORM, ontology.encode(ontology.INFORM, ack)) == ack
+
+
+@pytest.mark.parametrize("body, match", [
+    ({"type": "hotspot_result", "month_index": 0, "ds_division": "D",
+      "status": "safe", "rule_id": None, "evidence_month_indexes": [], "reason": None}, "status"),
+    ({"type": "hotspot_result", "month_index": 0, "ds_division": "D",
+      "status": "active", "rule_id": None, "evidence_month_indexes": [True], "reason": None}, "evidence_month_indexes"),
+    ({"type": "alert_ack", "month_index": 0, "ds_division": "D", "confirmed": True}, "unexpected"),
+])
+def test_new_alert_flow_contract_rejects_invalid_payloads(body, match):
+    with pytest.raises(ontology.SchemaError, match=match):
+        ontology.validate(ontology.INFORM, body)
+
+
 def test_log_writes_header_and_rows(tmp_path):
     path = tmp_path / "messages.csv"
     msg_log.log_message("a@x", "b@x", "cfp", "t1", _cfp(), "sent", path=path)

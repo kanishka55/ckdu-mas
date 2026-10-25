@@ -1,0 +1,8 @@
+{
+  "fixture_note": "Synthetic-shaped illustrative evaluator inputs only; not observations, team outputs, or scientific validation.",
+  "records": [
+    {"type": "risk_record", "month_index": 0, "ds_division": "Fixture A", "wqi": 120.0, "tier": "Poor", "drivers": ["synthetic_fixture"]},
+    {"type": "risk_record", "month_index": 0, "ds_division": "Fixture B", "wqi": 75.0, "tier": "Good", "drivers": ["synthetic_fixture"]},
+    {"type": "risk_record", "month_index": 0, "ds_division": "Fixture C", "wqi": 40.0, "tier": "Excellent", "drivers": ["synthetic_fixture"]}
+  ]
+}

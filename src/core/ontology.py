@@ -28,6 +28,10 @@ risk_record (inform)             RiskScoring -> Coordinator, Alert, Hotspot
     tier:str          risk tier label from the published WQI classes
     drivers:list      parameter names that contributed most to the score
 
+hotspot_result (inform)          Hotspot -> Alert
+    month_index:int, ds_division:str, status:str (active|inactive|unavailable)
+    rule_id:str|null, evidence_month_indexes:list[int], reason:str|null
+
 well_risk (inform)               RiskScoring -> Hotspot  (per-well detail behind one risk_record)
     month_index:int, month:int (calendar 1-12), ds_division:str, district:str
     ckdu_prevalence_class:str  Cooray et al.'s class for the division (for the alignment check)
@@ -65,6 +69,15 @@ failure (failure)                Village -> Coordinator, could not take the allo
 
 alert (inform)                   Alert -> village health officer
     month_index:int, ds_division:str, tier:str, hotspot:bool, message:str
+
+alert_ack (inform)                Alert recipient -> Alert
+    month_index:int, ds_division:str
+    Correlate to the corresponding alert using the SPADE thread ID.
+
+The ``hotspot_result`` and ``alert_ack`` bodies are strict typed transport contracts. The
+hotspot status is a project-defined screening outcome, not validated epidemiological evidence;
+an ``unavailable`` status cannot be treated as inactive. An ``alert_ack`` confirms receipt only
+at the configured transport recipient, not delivery to a real health-officer endpoint.
 """
 from __future__ import annotations
 
@@ -108,6 +121,17 @@ SCHEMAS: dict[str, tuple[frozenset[str], dict[str, tuple[type, ...]]]] = {
             "wqi": _NUM + (type(None),),
             "tier": (str,),
             "drivers": (list,),
+        },
+    ),
+    "hotspot_result": (
+        frozenset({INFORM}),
+        {
+            "month_index": (int,),
+            "ds_division": (str,),
+            "status": (str,),
+            "rule_id": (str, type(None)),
+            "evidence_month_indexes": (list,),
+            "reason": (str, type(None)),
         },
     ),
     "well_risk": (
@@ -179,6 +203,10 @@ SCHEMAS: dict[str, tuple[frozenset[str], dict[str, tuple[type, ...]]]] = {
             "message": (str,),
         },
     ),
+    "alert_ack": (
+        frozenset({INFORM}),
+        {"month_index": (int,), "ds_division": (str,)},
+    ),
 }
 
 
@@ -221,6 +249,13 @@ def validate(performative: str, body: dict[str, Any]) -> None:
 
 
 def _check_values(msg_type: str, body: dict[str, Any]) -> None:
+    if msg_type == "hotspot_result":
+        if body["status"] not in {"active", "inactive", "unavailable"}:
+            raise SchemaError("hotspot_result.status must be active, inactive, or unavailable")
+        indexes = body["evidence_month_indexes"]
+        if any(isinstance(index, bool) or not isinstance(index, int) or index < 0
+               for index in indexes):
+            raise SchemaError("hotspot_result.evidence_month_indexes must contain non-negative integers")
     if "resource" in body and body["resource"] not in RESOURCES:
         raise SchemaError(f"{msg_type}.resource must be one of {sorted(RESOURCES)}")
     if "season" in body and body["season"] not in SEASONS:
