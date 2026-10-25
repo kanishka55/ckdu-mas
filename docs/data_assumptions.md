@@ -52,9 +52,11 @@ accuracy for the DS area. Good enough for distances and map markers. Not a bound
 - Distance = **straight-line (haversine) km** from the DS point to the depot
   (`src/core/geo.py`). It is not a road distance, and we applied no road-detour factor, because
   we have no published factor to use.
-- Distance is **not** part of a village's bid (see "Bid function" below). The ResourceCoordinator
-  uses it as the delivery cost of bowser trips. The comparison DS divisions (Monaragala 192.8 km,
-  Kandy 118.5 km) sit far from the depot, so serving them by bowser is expensive.
+- Distance is **not** part of a village's bid (see "Bid function" below), and it does **not** affect
+  the current ResourceCoordinator ranking. It is retained as descriptive village metadata only;
+  the current implementation has no bowser delivery-cost formula or cost-based allocation rule.
+  The comparison DS divisions (Monaragala 192.8 km, Kandy 118.5 km) sit far from the depot, but
+  the simulation does not currently use those distances to rank or price resource delivery.
 - `tests/test_wells.py` recomputes every distance from `lat`/`lon` and fails if they drift apart.
 
 ### `n_wells_modelled = 20`: assumption
@@ -96,4 +98,5 @@ VillageAgent then refuses the CFP. The coordinator compares bids after `normalis
 
 Changed on 2026-10-17: the first draft divided by `distance_to_depot_km`. In the A+B test run that
 made Padaviya (tier Poor, 68 km) bid less than Kandy (tier Good), i.e. the most remote at-risk
-villages were served last. Distance is a delivery cost, not a need, so it moved to the coordinator.
+villages were served last. Distance was removed from the need score. The current coordinator ranks
+only normalized `risk × population` bids; a separate delivery-cost policy has not been implemented.

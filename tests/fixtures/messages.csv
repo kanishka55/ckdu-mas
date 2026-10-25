@@ -1,0 +1,10 @@
+timestamp,sender,receiver,performative,thread_id,payload,direction
+2026-01-01T00:00:00+00:00,RiskScoringAgent,AlertAgent,inform,risk:Fixture A:0,"{""type"":""risk_record"",""month_index"":0,""ds_division"":""Fixture A"",""wqi"":120.0,""tier"":""Poor"",""drivers"":[""synthetic_fixture""]}",received
+2026-01-01T00:00:00+00:00,RiskScoringAgent,AlertAgent,inform,risk:Fixture A:0,"{""type"":""risk_record"",""month_index"":0,""ds_division"":""Fixture A"",""wqi"":120.0,""tier"":""Poor"",""drivers"":[""synthetic_fixture""]}",sent
+2026-01-01T00:01:15+00:00,AlertAgent,Fixture A,inform,risk:Fixture A:0,"{""type"":""alert"",""month_index"":0,""ds_division"":""Fixture A"",""tier"":""Poor"",""hotspot"":false,""message"":""Illustrative synthetic risk-indicator alert.""}",sent
+2026-01-01T01:00:00+00:00,Coordinator,Village A,cfp,cn-thread,"{""type"":""cfp"",""month_index"":0,""round"":1,""resource"":""bowser"",""units_available"":1,""deadline_s"":2.0}",sent
+2026-01-01T01:00:00+00:00,Coordinator,Village A,cfp,cn-thread,"{""type"":""cfp"",""month_index"":0,""round"":1,""resource"":""bowser"",""units_available"":1,""deadline_s"":2.0}",received
+2026-01-01T01:00:00.100+00:00,Village A,Coordinator,propose,cn-thread,"{""type"":""propose"",""month_index"":0,""round"":1,""ds_division"":""Fixture A"",""bid"":0.8,""risk_tier"":""Poor"",""population"":10}",sent
+2026-01-01T01:00:02+00:00,Coordinator,Village A,cfp,cn-thread,"{""type"":""cfp"",""month_index"":0,""round"":2,""resource"":""bowser"",""units_available"":1,""deadline_s"":2.0}",sent
+2026-01-01T01:00:03+00:00,Coordinator,Village A,accept-proposal,cn-thread,"{""type"":""accept_proposal"",""month_index"":0,""round"":2,""resource"":""bowser"",""units"":1}",sent
+2026-01-01T01:00:04+00:00,Village A,Coordinator,inform,cn-thread,"{""type"":""inform_done"",""month_index"":0,""round"":2,""ds_division"":""Fixture A"",""resource"":""bowser"",""units"":1}",sent

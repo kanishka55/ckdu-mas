@@ -1,0 +1,7 @@
+{
+  "fixture_note": "Illustrative synthetic alert/audit events; wording and tier values are test data, not real alerts.",
+  "events": [
+    {"event_type": "alert_issued", "ds_division": "Fixture A", "month": 1, "tier": "Poor", "text": "Illustrative synthetic risk-indicator alert.", "source": "synthetic", "hotspot": false},
+    {"event_type": "alert_suppressed", "ds_division": "Fixture B", "month": 1, "tier": "Good", "source": "synthetic", "hotspot": false, "reason": "unchanged_state"}
+  ]
+}

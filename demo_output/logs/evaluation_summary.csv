@@ -1,0 +1,6 @@
+metric,scope,value,unit,status,observations,details
+risk_classification_alignment,all,,proportion,unavailable,0,"{""reason"":""no risk records""}"
+allocation_efficiency,all,,risk-weighted persons,unavailable,0,"{""reason"":""allocation log is missing""}"
+alert_latency,all,,seconds,unavailable,0,"{""reason"":""risk-input event selector is not supplied""}"
+negotiation_rounds,all,,rounds,unavailable,0,"{""reason"":""complete consistently threaded negotiation history is not confirmed""}"
+negotiation_logged_event_rows,all,,unique messages,unavailable,0,"{""reason"":""complete consistently threaded negotiation history is not confirmed""}"

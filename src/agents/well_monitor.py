@@ -62,4 +62,6 @@ class WellMonitorAgent(Agent):
             agent.ticks_handled.append(tick["month_index"])
 
     async def setup(self):
-        self.add_behaviour(self.OnMonthTick(), Template(metadata={"performative": ontology.INFORM}))
+        common.add_observed_behaviour(
+            self, self.OnMonthTick(), Template(metadata={"performative": ontology.INFORM}),
+        )

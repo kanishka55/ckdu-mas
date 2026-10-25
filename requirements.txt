@@ -83,6 +83,6 @@ uvicorn==0.54.0
 watchdog==6.0.0
 websockets==17.2
 win32_setctime==1.2.0
-winloop==0.7.2
+winloop==0.7.2; sys_platform == "win32"
 xyzservices==2026.9.1
 yarl==1.25.1

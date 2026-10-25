@@ -1,0 +1,13 @@
+{
+  "fixture_note": "Invented test-only population and risk weights for exercising the documented evaluator; not observed or scientifically validated.",
+  "population_by_division": {
+    "Fixture A": 10,
+    "Fixture B": 20,
+    "Fixture C": 5
+  },
+  "risk_weights": [
+    {"ds_division": "Fixture A", "month": 1, "risk_weight": 3.0},
+    {"ds_division": "Fixture B", "month": 1, "risk_weight": 1.0},
+    {"ds_division": "Fixture C", "month": 1, "risk_weight": 2.0}
+  ]
+}
