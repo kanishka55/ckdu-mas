@@ -27,18 +27,80 @@ from dashboard.app import (
     _render_live_coordination_snapshot,
     _coordination_event_source,
     _live_coordination_run_options,
+    _preferred_live_run_label,
+    _select_new_live_lab_run,
+    _hotspot_tier_warning,
     _selected_run_id,
     _lab_run_history_rows,
     _status_callout,
+    _agent_summary_fields,
+    _filter_agent_cards,
+    _render_agent_cards,
 )
 
 
 class TestDashboardData(unittest.TestCase):
+    def test_agent_output_summary_uses_readable_labels_and_preserves_values(self) -> None:
+        fields = _agent_summary_fields(
+            "type=risk_record, month_index=1, ds_division=Talawa, tier=Poor, wqi=116.6"
+        )
+        self.assertEqual(fields, (
+            ("Message", "risk_record"),
+            ("Simulation month", "1"),
+            ("Division", "Talawa"),
+            ("Risk tier", "Poor"),
+            ("WQI score", "116.6"),
+        ))
+
+    def test_agent_filter_supports_multiple_identities_and_no_selection(self) -> None:
+        cards = (
+            {"name": "VillageAgent", "identity": "village_a@localhost"},
+            {"name": "HotspotAgent", "identity": "hotspot@localhost"},
+            {"name": "AlertProcessingAgent", "identity": "alerts@localhost"},
+        )
+        selected = _filter_agent_cards(cards, ("village_a@localhost", "alerts@localhost"))
+        self.assertEqual(tuple(card["identity"] for card in selected),
+                         ("village_a@localhost", "alerts@localhost"))
+        self.assertEqual(_filter_agent_cards(cards, ()), ())
+
+    def test_agent_cards_start_with_no_agents_selected(self) -> None:
+        class Recorder:
+            def __init__(self):
+                self.multiselect_args = None
+                self.infos = []
+
+            def subheader(self, _text):
+                pass
+
+            def caption(self, _text):
+                pass
+
+            def multiselect(self, label, **kwargs):
+                self.multiselect_args = (label, kwargs)
+                return kwargs["default"]
+
+            def info(self, text):
+                self.infos.append(text)
+
+        recorder = Recorder()
+        _render_agent_cards(recorder, ({"name": "AlertProcessingAgent", "identity": "alerts@localhost"},))
+        label, options = recorder.multiselect_args
+        self.assertEqual(options["default"], ())
+        self.assertEqual(options["key"], "simulation_lab_agent_filter_v2")
+        self.assertIn("select one or more", label)
+        self.assertTrue(any("No agents selected" in text for text in recorder.infos))
+
     def _write_csv(self, path: Path, columns: list[str], rows: list[list[str]]) -> None:
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(columns)
             writer.writerows(rows)
+
+    def test_hotspot_tier_warning_tracks_enabled_valid_selection(self) -> None:
+        self.assertIsNotNone(_hotspot_tier_warning(True, ()))
+        self.assertIsNotNone(_hotspot_tier_warning(True, ("Unknown", "invalid")))
+        self.assertIsNone(_hotspot_tier_warning(True, ("Poor", "Very Poor")))
+        self.assertIsNone(_hotspot_tier_warning(False, ()))
 
     def test_completed_with_expected_warmup_and_unavailable_evidence_has_clear_callout(self) -> None:
         class Recorder:
@@ -242,6 +304,91 @@ class TestDashboardData(unittest.TestCase):
         self.assertEqual(model["run_state"], "completed snapshot")
         self.assertEqual(model["run_status"], "completed")
 
+    def test_queued_lab_run_without_manifest_is_reported_as_queued(self) -> None:
+        class Box:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def metric(self, *_args, **_kwargs):
+                pass
+
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def __getattr__(self, name):
+                if name in {"subheader", "caption", "success", "warning", "error", "info", "markdown"}:
+                    return lambda value: self.calls.append((name, value))
+                raise AttributeError(name)
+
+            def dataframe(self, *_args, **_kwargs):
+                pass
+
+            def columns(self, count):
+                return [Box() for _ in range(count)]
+
+            def expander(self, _label):
+                return Box()
+
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "queued-run"
+            run_dir.mkdir()
+            snapshot = load_agent_monitor(run_dir)
+        recorder = Recorder()
+        _render_live_coordination_snapshot(
+            recorder, snapshot, run_status_override="queued", run_id_override="queued-run"
+        )
+        self.assertTrue(any(kind == "info" and "Run queued" in value for kind, value in recorder.calls))
+        self.assertTrue(any(kind == "caption" and "Run ID: queued-run" in value
+                            for kind, value in recorder.calls))
+        self.assertFalse(any(kind == "success" and "Run active" in value
+                             for kind, value in recorder.calls))
+
+    def test_runner_started_without_manifest_is_not_claimed_as_live(self) -> None:
+        class Box:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def metric(self, *_args, **_kwargs):
+                pass
+
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def __getattr__(self, name):
+                if name in {"subheader", "caption", "success", "warning", "error", "info", "markdown"}:
+                    return lambda value: self.calls.append((name, value))
+                raise AttributeError(name)
+
+            def dataframe(self, *_args, **_kwargs):
+                pass
+
+            def columns(self, count):
+                return [Box() for _ in range(count)]
+
+            def expander(self, _label):
+                return Box()
+
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "starting-run"
+            run_dir.mkdir()
+            snapshot = load_agent_monitor(run_dir)
+        recorder = Recorder()
+        _render_live_coordination_snapshot(
+            recorder, snapshot, run_status_override="running", run_id_override="starting-run"
+        )
+        self.assertTrue(any(kind == "info" and "Waiting for its initial manifest and heartbeat" in value
+                            for kind, value in recorder.calls))
+        self.assertFalse(any(kind == "success" and "Run active" in value
+                             for kind, value in recorder.calls))
+
     def test_live_coordination_model_keeps_stale_failed_and_malformed_states_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
@@ -307,8 +454,39 @@ class TestDashboardData(unittest.TestCase):
             options = _live_coordination_run_options(str(configured), root)
         self.assertEqual(len(options), 2)
         self.assertIn("Configured run", options[0][0])
-        self.assertTrue(any("Simulation Lab · lab-run · completed" == label and path == run_dir
+        self.assertTrue(any("Simulation Lab · lab-run" == label and path == run_dir
                             for label, path in options))
+
+    def test_live_coordination_prefers_active_lab_run_and_keeps_stable_selection(self) -> None:
+        configured = Path("/runs/configured-completed")
+        lab = Path("/lab/runs/new-run")
+        options = ((f"Configured run · {configured}", configured),
+                   ("Simulation Lab · new-run", lab))
+
+        self.assertEqual(
+            _preferred_live_run_label(options, selected_run_id=None,
+                                       active_lab_run_ids=("new-run",)),
+            "Simulation Lab · new-run",
+        )
+        # Status transitions do not change the option value; persisted selection remains valid.
+        self.assertEqual(
+            _preferred_live_run_label(options, selected_run_id="new-run",
+                                       active_lab_run_ids=()),
+            "Simulation Lab · new-run",
+        )
+        self.assertEqual(
+            _preferred_live_run_label(options, selected_run_id="missing-run",
+                                       active_lab_run_ids=()),
+            options[0][0],
+        )
+
+    def test_new_lab_run_selection_overrides_prior_snapshot_and_navigates_to_monitor(self) -> None:
+        session = {"live_coordination_run_selector": "Configured run · /runs/old-snapshot"}
+        _select_new_live_lab_run(session, "fresh-run")
+        self.assertEqual(session["simulation_lab_selected_run_id"], "fresh-run")
+        self.assertEqual(session["live_coordination_selected_run_id"], "fresh-run")
+        self.assertEqual(session["live_coordination_run_selector"], "Simulation Lab · fresh-run")
+        self.assertTrue(session["dashboard_navigate_to_live_run"])
 
     def test_simulation_lab_history_selection_and_status_summary(self) -> None:
         class Selection:

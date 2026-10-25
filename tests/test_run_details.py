@@ -160,11 +160,46 @@ class SimulationRunDetailsTests(unittest.TestCase):
         village_card, = [row for row in view["agents"] if row["identity"] == "village@localhost"]
         self.assertEqual(village_card["latest_input"], "Waiting for input.")
         self.assertEqual(village_card["output_to"], "No output recipient/destination recorded.")
+        by_identity = {row["identity"]: row for row in view["agents"]}
+        self.assertEqual(by_identity["clock@localhost"]["output_order"], 1)
+        self.assertIn("month_tick", by_identity["clock@localhost"]["first_output"])
+        self.assertEqual(by_identity["risk@localhost"]["output_order"], 2)
+        self.assertIn("risk_record", by_identity["risk@localhost"]["first_output"])
+        self.assertLess(by_identity["risk@localhost"]["execution_order"],
+                        by_identity["village@localhost"]["execution_order"])
+
+    def test_alert_processing_card_exposes_exact_sent_alert_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = self._run(Path(temp))
+            append_event(run_dir / "agent_events.jsonl", "agent_started", "AlertProcessingAgent",
+                         identity="alerts@localhost")
+            alert_text = (
+                "Risk indicator: published guideline ranges are exceeded. "
+                "Use an alternate source where possible, and consider routine screening."
+            )
+            body = {
+                "type": "alert", "month_index": 2, "ds_division": "Sample",
+                "tier": "Poor", "hotspot": True, "message": alert_text,
+            }
+            msg_log.log_message(
+                "alerts@localhost", "inbox@localhost", ontology.INFORM, "alert-2-Sample",
+                ontology.encode(ontology.INFORM, body), "sent",
+                path=run_dir / "logs/messages.csv",
+            )
+            view = build_execution_view(load_simulation_run_details(run_dir), run_status="completed")
+
+        alert_card, = [card for card in view["agents"]
+                       if card["identity"] == "alerts@localhost"]
+        self.assertEqual(alert_card["latest_result"],
+                         "type=alert, month_index=2, ds_division=Sample, tier=Poor")
+        self.assertEqual(alert_card["recipient_message"], alert_text)
+        self.assertEqual(alert_card["output_to"], "inbox@localhost")
 
     def test_agent_event_grouping_separates_explicit_events_from_runner_summaries(self):
         with tempfile.TemporaryDirectory() as temp:
             details = load_simulation_run_details(self._run(Path(temp)))
-        agent, = agent_execution_details(details)
+        agent, = [row for row in agent_execution_details(details)
+                  if row["identity"] == "risk@localhost"]
         self.assertEqual(agent["component"], "RiskScoringAgent")
         self.assertEqual(agent["latest_phase"], "scoring")
         timeline = combined_timeline(details)
@@ -356,6 +391,8 @@ class SimulationRunDetailsTests(unittest.TestCase):
                     return lambda count: [Box() for _ in range(count if isinstance(count, int) else len(count))]
                 if name in {"selectbox", "number_input"}:
                     return lambda _label, options, **_kwargs: options[0] if isinstance(options, (list, tuple, range)) else 1
+                if name == "multiselect":
+                    return lambda _label, options, **kwargs: kwargs.get("default", options)
                 if name in {"expander"}:
                     return lambda *_args, **_kwargs: Box()
                 return lambda *args, **_kwargs: self.text.extend(str(arg) for arg in args)

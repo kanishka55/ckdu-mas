@@ -344,6 +344,9 @@ def agent_execution_details(details: SimulationRunDetails) -> tuple[dict[str, An
     identities = set(status_by_identity)
     identities.update(str(event["identity"]) for event in details.events
                       if isinstance(event.get("identity"), str) and event.get("identity"))
+    identities.update(str(identity) for message in details.messages
+                      for identity in (message.get("sender"), message.get("receiver"))
+                      if isinstance(identity, str) and identity)
     rows = []
     for identity in sorted(identities):
         agent_status = status_by_identity.get(identity, {})
@@ -385,6 +388,16 @@ def _latest_evidence(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None
         return None
     return max(enumerate(rows), key=lambda pair: (
         _parse_time(pair[1].get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+        pair[1].get("event_seq", 0) if isinstance(pair[1].get("event_seq"), int) else pair[0],
+        pair[0],
+    ))[1]
+
+
+def _earliest_evidence(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return min(enumerate(rows), key=lambda pair: (
+        _parse_time(pair[1].get("timestamp")) or datetime.max.replace(tzinfo=timezone.utc),
         pair[1].get("event_seq", 0) if isinstance(pair[1].get("event_seq"), int) else pair[0],
         pair[0],
     ))[1]
@@ -439,8 +452,10 @@ def _agent_cards(details: SimulationRunDetails) -> tuple[dict[str, Any], ...]:
         related = [row for row in details.messages if identity in {row.get("sender"), row.get("receiver")}]
         incoming = _latest_evidence([row for row in related if row.get("direction") == "received"
                                      and row.get("receiver") == identity])
-        outgoing = _latest_evidence([row for row in related if row.get("direction") == "sent"
-                                     and row.get("sender") == identity])
+        sent_messages = [row for row in related if row.get("direction") == "sent"
+                         and row.get("sender") == identity]
+        outgoing = _latest_evidence(sent_messages)
+        first_output = _earliest_evidence(sent_messages)
         events = list(agent["events"])
         relevant_events = [row for row in events if row.get("event_type") not in {
             "agent_heartbeat", "agent_started", "agent_starting", "agent_stopped",
@@ -454,23 +469,45 @@ def _agent_cards(details: SimulationRunDetails) -> tuple[dict[str, Any], ...]:
         artifact_result, artifact_destination = _artifact_result(component_name, details)
         result = _message_brief(outgoing) if outgoing else (
             artifact_result or (_event_brief(latest_event) if latest_event else "No result recorded yet."))
+        outgoing_body = outgoing.get("decoded_payload") if outgoing else None
+        recipient_message = (
+            outgoing_body.get("message")
+            if component_name == "AlertProcessingAgent"
+            and isinstance(outgoing_body, Mapping)
+            and outgoing_body.get("type") == "alert"
+            and isinstance(outgoing_body.get("message"), str)
+            else None
+        )
         output_to = str(outgoing.get("receiver")) if outgoing else (
             artifact_destination or "No output recipient/destination recorded.")
         cards.append({
             "name": component_name, "identity": identity,
             "status": agent["status"], "status_evidence": agent["status_evidence"],
+            "first_observed": agent["first_observed"],
             "activity": str(activity),
             "latest_input": _message_brief(incoming) if incoming else "Waiting for input.",
-            "latest_result": result, "output_to": output_to,
+            "latest_result": result, "recipient_message": recipient_message,
+            "output_to": output_to,
+            "first_output_at": first_output.get("timestamp") if first_output else None,
+            "first_output": _message_brief(first_output) if first_output else "No sent message logged.",
             "sent_rows": agent["sent_rows"], "received_rows": agent["received_rows"],
             "component": agent["component"],
         })
-    order = {name: index for index, name in enumerate((
-        "ClockAgent", "WellMonitorAgent", "RiskScoringAgent", "VillageAgent",
-        "RiskRecordCollector", "ResourceCoordinatorAgent", "HotspotAgent",
-        "AlertProcessingAgent", "AlertInboxAgent",
-    ))}
-    return tuple(sorted(cards, key=lambda row: (order.get(row["name"], 99), row["identity"])))
+    observed_order = sorted(cards, key=lambda row: (
+        _parse_time(row["first_observed"]) or datetime.max.replace(tzinfo=timezone.utc),
+        row["identity"],
+    ))
+    for index, card in enumerate(observed_order, start=1):
+        card["execution_order"] = index if card["first_observed"] else None
+    output_order = sorted((card for card in cards if card["first_output_at"]), key=lambda row: (
+        _parse_time(row["first_output_at"]) or datetime.max.replace(tzinfo=timezone.utc),
+        row["identity"],
+    ))
+    for index, card in enumerate(output_order, start=1):
+        card["output_order"] = index
+    for card in cards:
+        card.setdefault("output_order", None)
+    return tuple(observed_order)
 
 
 def _collaboration_flow(details: SimulationRunDetails,

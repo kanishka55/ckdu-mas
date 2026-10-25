@@ -14,7 +14,7 @@ import html
 import json
 import math
 import os
-import sys
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1236,16 +1236,68 @@ def _status_callout(st: Any, status: str, run_id: Any,
         st.warning(message + " · status is not confirmed")
 
 
+_AGENT_RESULT_LABELS = {
+    "type": "Message",
+    "month_index": "Simulation month",
+    "round": "Round",
+    "ds_division": "Division",
+    "tier": "Risk tier",
+    "wqi": "WQI score",
+    "bid": "Bid score",
+    "status": "Outcome",
+    "screening_status": "Screening status",
+    "delivery_status": "Delivery status",
+    "resource": "Resource",
+}
+
+
+def _agent_summary_fields(summary: Any) -> tuple[tuple[str, str], ...]:
+    """Turn the run-details compact key/value evidence into readable labels."""
+    text = str(summary or "").strip()
+    if not text or text in {"Waiting for input.", "No result recorded yet.",
+                            "No sent message logged."}:
+        return (("Evidence", text or "Unavailable"),)
+    parts = re.split(r", (?=[a-z][a-z0-9_]*=)", text)
+    fields = []
+    for part in parts:
+        key, separator, value = part.partition("=")
+        if not separator:
+            return (("Recorded details", text),)
+        fields.append((_AGENT_RESULT_LABELS.get(key, key.replace("_", " ").capitalize()), value))
+    return tuple(fields)
+
+
+def _filter_agent_cards(cards: Sequence[Mapping[str, Any]], selected_identities: Sequence[str]
+                        ) -> tuple[Mapping[str, Any], ...]:
+    selected = set(selected_identities)
+    return tuple(card for card in cards if str(card.get("identity", "")) in selected)
+
+
 def _render_agent_cards(st: Any, cards: Sequence[Mapping[str, Any]]) -> None:
-    st.subheader("Agent activity")
+    st.subheader("Agent activities · observed execution and output order")
+    st.caption("Execution order follows each agent's first recorded event or message. Output order follows first sent-message timestamps only; concurrent work may overlap, and missing evidence stays unavailable.")
     if not cards:
         st.info("No agent identities have been observed yet. Status and activity are unknown.")
         return
-    for offset in range(0, len(cards), 3):
-        columns = st.columns(min(3, len(cards) - offset))
-        for column, card in zip(columns, cards[offset:offset + 3]):
+    identities = [str(card.get("identity", "")) for card in cards]
+    labels = {str(card.get("identity", "")): f"{card.get('name', 'Agent')} · {card.get('identity', 'Identity unavailable')}"
+              for card in cards}
+    selected = st.multiselect(
+        "Filter agents (select one or more)", options=identities, default=(),
+        format_func=lambda identity: labels.get(identity, identity),
+        key="simulation_lab_agent_filter_v2",
+    )
+    visible_cards = _filter_agent_cards(cards, selected)
+    if not visible_cards:
+        st.info("No agents selected. Choose one or more agents to view their activity and outputs.")
+        return
+    for offset in range(0, len(visible_cards), 3):
+        columns = st.columns(min(3, len(visible_cards) - offset))
+        for column, card in zip(columns, visible_cards[offset:offset + 3]):
             with column.container(border=True):
-                st.markdown(f"**{card['name']}**")
+                execution_order = card.get("execution_order")
+                order_label = f"Execution {execution_order}" if execution_order is not None else "Execution order unavailable"
+                st.markdown(f"**{order_label} · {card['name']}**")
                 st.caption(str(card.get("identity", "Identity unavailable")))
                 state = str(card.get("status", "unknown"))
                 if state == "running":
@@ -1261,9 +1313,19 @@ def _render_agent_cards(st: Any, cards: Sequence[Mapping[str, Any]]) -> None:
                 else:
                     st.warning("Status unknown/stale")
                 st.markdown(f"**Activity:** {card['activity']}")
-                st.caption(f"Latest input: {card['latest_input']}")
-                st.caption(f"Latest result: {card['latest_result']}")
+                with st.expander("Latest input", expanded=False):
+                    for label, value in _agent_summary_fields(card.get("latest_input")):
+                        st.write(f"**{label}:** {value}")
+                st.markdown("**Latest result**")
+                for label, value in _agent_summary_fields(card.get("latest_result")):
+                    st.write(f"**{label}:** {value}")
+                if card.get("recipient_message"):
+                    st.markdown("**Alert message sent to the simulated inbox**")
+                    st.info(card["recipient_message"])
                 st.caption(f"Output recipient: {card['output_to']}")
+                output_order = card.get("output_order")
+                output_label = f"Sent output {output_order}" if output_order is not None else "Sent output order unavailable"
+                st.caption(f"{output_label}: {card['first_output']}")
 
 
 def _render_collaboration_flow(st: Any, flow: Mapping[str, Any]) -> None:
@@ -1493,16 +1555,71 @@ def _live_coordination_run_options(configured_run: str | None, lab_root: Path) -
     for row in list_lab_runs(lab_root):
         path = Path(row["run_dir"])
         if all(existing.resolve() != path.resolve() for _label, existing in options):
-            options.append((f"Simulation Lab · {row['run_id']} · {row['status']}", path))
+            # Keep option identity stable across queued/running/completed transitions.
+            options.append((f"Simulation Lab · {row['run_id']}", path))
     return tuple(options)
 
 
-def _render_live_coordination_snapshot(st: Any, snapshot: AgentMonitorSnapshot) -> None:
+def _preferred_live_run_label(
+    options: Sequence[tuple[str, Path]],
+    *,
+    selected_run_id: str | None,
+    active_lab_run_ids: Sequence[str],
+) -> str | None:
+    """Retain an explicit run selection, otherwise prefer an active lab run over snapshots."""
+    labels = [label for label, _path in options]
+    if selected_run_id:
+        selected = next((label for label in labels
+                         if label == f"Simulation Lab · {selected_run_id}"), None)
+        if selected is not None:
+            return selected
+    for run_id in active_lab_run_ids:
+        label = f"Simulation Lab · {run_id}"
+        if label in labels:
+            return label
+    return labels[0] if labels else None
+
+
+def _select_new_live_lab_run(session: Any, run_id: str) -> None:
+    """Make the just-launched run the next Live Coordination selection."""
+    session["simulation_lab_selected_run_id"] = run_id
+    session["live_coordination_selected_run_id"] = run_id
+    session["live_coordination_run_selector"] = f"Simulation Lab · {run_id}"
+    session["dashboard_navigate_to_live_run"] = True
+
+
+def _hotspot_tier_warning(enabled: bool, selected_tiers: Any) -> str | None:
+    """Return a configuration warning only when enabled screening lacks a valid tier."""
+    valid_selection = (
+        isinstance(selected_tiers, (tuple, list))
+        and any(isinstance(tier, str) and tier in HOTSPOT_TRIGGER_TIERS
+                for tier in selected_tiers)
+    )
+    if enabled and not valid_selection:
+        return (
+            "Select at least one tier. The selected tier set and persistence window are "
+            "provisional user configuration, not a validated medical or epidemiological rule."
+        )
+    return None
+
+
+def _render_live_coordination_snapshot(
+    st: Any,
+    snapshot: AgentMonitorSnapshot,
+    *,
+    run_status_override: str | None = None,
+    run_id_override: str | None = None,
+) -> None:
     model = _live_coordination_model(snapshot)
     st.subheader("Live Agent Coordination")
-    st.caption(f"Run ID: {model['run_id']} · configured run directory: {model['run_dir']}")
+    run_id = run_id_override or model["run_id"]
+    st.caption(f"Run ID: {run_id} · configured run directory: {model['run_dir']}")
     st.caption("Source is one explicitly configured SPADE run. Team outputs, illustrative fixtures, and generated local-demo data are separate.")
-    if model["run_state"] == "live":
+    if run_status_override == "queued":
+        st.info("Run queued in Simulation Lab. Waiting for the runner to start and write its manifest; agent and message activity are not yet confirmed.")
+    elif run_status_override == "running" and model["run_state"] == "unknown":
+        st.info("Runner process has started. Waiting for its initial manifest and heartbeat; live agent activity is not yet confirmed.")
+    elif model["run_state"] == "live":
         st.success("Run active: the runner heartbeat is fresh. This is not a health check of domain behavior.")
     elif model["run_state"] == "stale":
         st.warning("Run manifest says running, but runner heartbeat evidence is stale. Current activity is not confirmed.")
@@ -1603,12 +1720,23 @@ def _render_live_coordination_snapshot(st: Any, snapshot: AgentMonitorSnapshot) 
                 st.warning(error)
 
 
-def _render_live_coordination(st: Any, run_dir: Path | None) -> None:
+def _render_live_coordination(
+    st: Any,
+    run_dir: Path | None,
+    *,
+    run_status_override: str | None = None,
+    run_id_override: str | None = None,
+) -> None:
     if run_dir is None:
         st.subheader("Live Agent Coordination")
         st.info("No simulation run is configured. Set CKDU_SIMULATION_RUN_DIR to the run directory containing run_manifest.json, agent_events.jsonl, and logs/messages.csv.")
         return
-    _render_live_coordination_snapshot(st, load_agent_monitor(run_dir))
+    _render_live_coordination_snapshot(
+        st,
+        load_agent_monitor(run_dir),
+        run_status_override=run_status_override,
+        run_id_override=run_id_override,
+    )
 
 
 def _render_lab_runs(st: Any, lab_root: Path) -> tuple[dict[str, Any], ...]:
@@ -1737,8 +1865,9 @@ def _render_simulation_lab(st: Any, lab_root: Path) -> None:
             disabled=not enable_hotspot,
             key="simulation_lab_hotspot_consecutive_months",
         )
-        if enable_hotspot:
-            st.warning("Select at least one tier. The selected tier set and persistence window are provisional user configuration, not a validated medical or epidemiological rule.")
+        tier_warning = _hotspot_tier_warning(enable_hotspot, trigger_tiers)
+        if tier_warning:
+            st.warning(tier_warning)
 
     st.markdown("#### Run configuration")
     with st.form("simulation_lab_run_form"):
@@ -1807,7 +1936,7 @@ def _render_simulation_lab(st: Any, lab_root: Path) -> None:
                     st.error(f"Simulation {launched['run_id']} failed to start: {launched.get('error')}")
                 else:
                     if hasattr(st, "session_state"):
-                        st.session_state["simulation_lab_selected_run_id"] = launched["run_id"]
+                        _select_new_live_lab_run(st.session_state, launched["run_id"])
                     st.success(f"Simulation {launched['run_id']} {launched['status']}. Output: {launched['run_dir']}")
                     st.rerun()
             except (OSError, ValueError, RuntimeError, FileExistsError) as exc:
@@ -1830,9 +1959,12 @@ def main() -> None:
     demo_output = os.environ.get("CKDU_DEMO_OUTPUT_DIR")
     simulation_run = os.environ.get("CKDU_SIMULATION_RUN_DIR")
     lab_root = Path(os.environ.get("CKDU_SIMULATION_LAB_DIR", default_lab_root())).expanduser()
+    if st.session_state.pop("dashboard_navigate_to_live_run", False):
+        st.session_state["dashboard_data_view"] = "Live Coordination"
     views = ("Team outputs", "Illustrative demo fixtures") + (("Generated local demo",) if demo_output else ()) + ("Agent Monitor", "Live Coordination", "Simulation Lab")
     default_view = views.index("Generated local demo") if demo_output else 0
-    view = st.radio("Data view", views, index=default_view, horizontal=True)
+    view = st.radio("Data view", views, index=default_view, horizontal=True,
+                    key="dashboard_data_view")
     if view == "Agent Monitor":
         if not simulation_run:
             st.subheader("Live Agent Monitor")
@@ -1855,17 +1987,48 @@ def main() -> None:
         return
     if view == "Live Coordination":
         run_options = _live_coordination_run_options(simulation_run, lab_root)
+        selected_lab_run_id = None
         if run_options:
-            selected_label = st.selectbox("Simulation run", tuple(label for label, _path in run_options),
+            active_lab_run_ids = tuple(
+                row["run_id"] for row in list_lab_runs(lab_root)
+                if row.get("status") in {"queued", "running"}
+            )
+            preferred = _preferred_live_run_label(
+                run_options,
+                selected_run_id=st.session_state.get("live_coordination_selected_run_id"),
+                active_lab_run_ids=active_lab_run_ids,
+            )
+            labels = tuple(label for label, _path in run_options)
+            if ("live_coordination_run_selector" not in st.session_state
+                    or st.session_state.get("live_coordination_run_selector") not in labels):
+                st.session_state["live_coordination_run_selector"] = preferred
+            selected_label = st.selectbox("Simulation run", labels,
                                           key="live_coordination_run_selector")
             monitor_dir = next(path for label, path in run_options if label == selected_label)
-            st.caption("Configured Compose runs use /app/simulation_run. Simulation Lab runs are read from their isolated run directory.")
+            selected_run = next((row for row in list_lab_runs(lab_root)
+                                 if Path(row["run_dir"]).resolve() == monitor_dir.resolve()), None)
+            selected_lab_run_id = selected_run.get("run_id") if selected_run is not None else None
+            if selected_run is None:
+                st.caption(f"Configured Compose run directory: {monitor_dir}")
+            st.caption("Simulation Lab runs remain in their isolated mounted run directories and are refreshed from the same journal and seven-column log while active.")
         else:
             monitor_dir = None
         if hasattr(st, "fragment"):
             @st.fragment(run_every=2)
             def refresh_coordination():
-                _render_live_coordination(st, monitor_dir)
+                current_status = None
+                if selected_lab_run_id:
+                    current = get_run_status(selected_lab_run_id, lab_root)
+                    current_status = current.get("status") if current else None
+                    st.caption(
+                        f"Selected Simulation Lab run status: {current_status or 'unknown'} · output: {monitor_dir}"
+                    )
+                _render_live_coordination(
+                    st,
+                    monitor_dir,
+                    run_status_override=current_status,
+                    run_id_override=selected_lab_run_id,
+                )
             refresh_coordination()
         else:
             if st.button("Refresh Live Coordination"):
