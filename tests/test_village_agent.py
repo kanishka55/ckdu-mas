@@ -69,6 +69,10 @@ class VillageCfpTests(unittest.IsolatedAsyncioTestCase):
         self.agent.risk = 120.0
         self.agent.risk_tier = "Poor"
         self.agent.risk_month_index = 4
+        self.agent.allocations = []
+        self.agent.held_resources = {}
+        self.agent.delivery_failure_months = frozenset()
+        self.agent.failed_delivery_months = set()
         self.behaviour = village.VillageAgent.RespondToCfp()
         self.behaviour.agent = self.agent
         self.msg = types.SimpleNamespace(sender="coordinator@example", thread="cfp-4")
@@ -96,6 +100,77 @@ class VillageCfpTests(unittest.IsolatedAsyncioTestCase):
         ontology.validate(performative, body)
         self.assertEqual(body["bid"], 12000.0)
         self.receive.assert_awaited_once()
+
+    def _accept_reply(self, *, month_index: int = 4, resource: str = "RO_unit"):
+        reply = types.SimpleNamespace(sender="coordinator@example", thread="cfp-4")
+        decision = {"type": "accept_proposal", "month_index": month_index, "round": 1,
+                    "resource": resource, "units": 1}
+        return AsyncMock(return_value=(reply, ontology.ACCEPT_PROPOSAL, decision))
+
+    async def test_village_holding_an_ro_unit_refuses_later_ro_cfps(self) -> None:
+        self.agent.held_resources = {"RO_unit": 2}
+        await self._handle()
+        performative, body = self._last_body()
+        self.assertEqual(performative, ontology.REFUSE)
+        self.assertEqual(body["reason"], "already holds an RO_unit (placed month_index 2)")
+        self.receive.assert_not_awaited()
+
+    async def test_held_ro_unit_does_not_block_recurring_bowser_bids(self) -> None:
+        self.agent.held_resources = {"RO_unit": 2}
+        self.cfp["resource"] = "bowser"
+        await self._handle()
+        performative, _ = self._last_body()
+        self.assertEqual(performative, ontology.PROPOSE)
+
+    async def test_confirmed_ro_award_is_remembered(self) -> None:
+        self.receive = self._accept_reply()
+        await self._handle()
+        performative, body = self._last_body()
+        self.assertEqual(performative, ontology.INFORM)
+        self.assertEqual(body["type"], "inform_done")
+        self.assertEqual(self.agent.held_resources, {"RO_unit": 4})
+
+    async def test_confirmed_bowser_award_is_not_held(self) -> None:
+        self.cfp["resource"] = "bowser"
+        self.receive = self._accept_reply(resource="bowser")
+        await self._handle()
+        self.assertEqual(self.agent.held_resources, {})
+
+    async def test_bowser_winner_refuses_a_reoffer_round_in_the_same_month(self) -> None:
+        self.cfp["resource"] = "bowser"
+        self.receive = self._accept_reply(resource="bowser")
+        await self._handle()
+        self.assertEqual(self._last_body()[0], ontology.INFORM)
+
+        self.receive = AsyncMock(return_value=None)
+        self.cfp["round"] = 2
+        await self._handle()
+        performative, body = self._last_body()
+        self.assertEqual(performative, ontology.REFUSE)
+        self.assertEqual(body["reason"], "already received a bowser this month")
+
+        # next month: bowsers are recurring, so the same village may bid again
+        self.cfp["round"] = 1
+        self.agent.risk_month_index = 5
+        await self._handle(month_index=5)
+        self.assertEqual(self._last_body()[0], ontology.PROPOSE)
+
+    async def test_simulated_delivery_failure_sends_failure_then_refuses_reoffer(self) -> None:
+        self.agent.delivery_failure_months = frozenset({4})
+        self.receive = self._accept_reply()
+        await self._handle()
+        performative, body = self._last_body()
+        self.assertEqual(performative, ontology.FAILURE)
+        ontology.validate(performative, body)
+        self.assertIn("simulated scenario", body["reason"])
+        self.assertEqual(self.agent.held_resources, {})
+
+        self.receive = AsyncMock(return_value=None)
+        self.cfp["round"] = 2
+        await self._handle()
+        performative, body = self._last_body()
+        self.assertEqual(performative, ontology.REFUSE)
+        self.assertEqual(body["reason"], "cannot take delivery this month")
 
     async def test_previous_month_risk_is_refused(self) -> None:
         self.agent.risk_month_index = 3

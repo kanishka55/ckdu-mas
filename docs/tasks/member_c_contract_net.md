@@ -16,7 +16,7 @@ Parts A and B are built and tested together (`pytest`: 101 passed). You can buil
 |---|---|---|
 | `WellMonitorAgent` (`src/agents/well_monitor.py`) | A | On each month tick, sends `well_readings` per village to RiskScoring |
 | `RiskScoringAgent` (`src/agents/risk_scoring.py`) | B | Sends one `risk_record` per village per month to its subscribers, **including you** |
-| `VillageAgent` × 11 (`src/agents/village.py`) | A | Holds its own wells only, answers your `cfp` with `propose` or `refuse`, answers `accept-proposal` with `inform` |
+| `VillageAgent` × 11 (`src/agents/village.py`) | A wrote it; **yours since 2026-10-25** | Holds its own wells only, answers your `cfp` with `propose` or `refuse`, answers `accept-proposal` with `inform` |
 | `bidding.normalise_bids` / `rank_bids` (`src/core/bidding.py`) | A | Scale raw bids to [0, 1]; rank with the alphabetical tie-break |
 | `common.send` / `common.receive` (`src/agents/common.py`) | A/D | Send/receive with ontology validation, a timeout, and logging to `logs/messages.csv` |
 | Toy demo `src/sim/demo_contract_net.py` | C | 1 coordinator + 3 villages, one round: **done, runs end to end** |
@@ -42,9 +42,12 @@ The fix is a STARTTLS workaround in `src/agents/xmpp_patch.py`, applied automati
 from `src.agents`. If you write an agent outside `src/agents`, import something from `src.agents`
 first, or logins against `spade run` will hang. Details: `docs/known_issues.md`.
 
-**Still yours to build:** `allocation.py` with the three allocators, `ResourceCoordinatorAgent`
-(state machine, multi-round, `failure` + re-offer), `ClockAgent` (the demos use a stub clock),
-`runner.py`, `config.py`, and `logs/allocations.csv`.
+**Update 2026-10-25:** the coordinator, ClockAgent, runner and `logs/allocations.csv` now exist. Added
+on top of them: `failure` + re-offer as extra CFP rounds, RO carry-over between months, and the
+`equal_split` / `first_come` baselines with the allocation comparison. Details:
+`docs/contract_net_coordinator.md` and `docs/simulation_runner.md`. Still open: `src/sim/config.py`
+with the pool-size justification (Horbulyk et al. 2021, section 3), team sign-off on the need-gated
+WQI risk weight, and a bowser cost model using `distance_to_depot_km`.
 
 ---
 
@@ -54,7 +57,7 @@ first, or logins against `spade run` will hang. Details: `docs/known_issues.md`.
 |---|---|
 | `src/core/allocation.py` | Pure allocation logic + the two baselines. No SPADE imports. |
 | `src/agents/resource_coordinator.py` | ResourceCoordinatorAgent — runs the Contract Net. |
-| `src/agents/clock.py` | ClockAgent — broadcasts the simulated "new month" tick. |
+| `src/agents/village.py` | VillageAgent — 11 instances, one per DS division (moved from A on 2026-10-25). Own data only; propose/refuse each CFP using A's `bid()`/`has_need()`; confirm (`inform`) or `failure`. |
 | `src/sim/runner.py` | Simulation runner — wires ticks to monthly negotiation rounds. |
 | `src/sim/demo_contract_net.py` | Week-1 toy demo: 1 coordinator + 3 villages. |
 | `src/sim/config.py` | Resource pool sizes, seeds, timeouts. |
@@ -138,20 +141,40 @@ assume distance affects current allocation results or introduce a formula withou
 
 In `allocation.py`, three pure functions over the same inputs so they are directly comparable:
 
-- [ ] `allocate_contract_net(bids, pool)` — your negotiated result.
-- [ ] `allocate_equal_split(villages, pool)` — baseline 1: divide the pool evenly, ignoring risk.
-- [ ] `allocate_first_come(bids, pool)` — baseline 2: serve in arrival order until the pool is empty.
-- [ ] One shared metric so the comparison means something: **risk-weighted population served**
+- [x] `allocate_contract_net(bids, pool)` — your negotiated result. (Done as the SPADE coordinator
+      plus `contract_net.select_awardees`.)
+- [x] `allocate_equal_split(villages, pool)` — baseline 1: divide the pool evenly, ignoring risk.
+      (`src/core/allocation.py`: round-robin over months.)
+- [x] `allocate_first_come(bids, pool)` — baseline 2: serve in arrival order until the pool is empty.
+      (`src/core/allocation.py`: real reply arrival order from the message log.)
+- [x] One shared metric so the comparison means something: **risk-weighted population served**
       (Σ risk × population over served villages). Agree the definition with D, who computes the
       evaluation. If the Contract Net does not beat both baselines on it, say so and investigate —
       a negative result honestly reported beats a fudged positive one.
+      **Implemented with risk = need-gated WQI** (WQI if tier Poor or worse, else 0). This is pending
+      team sign-off. Results on the 2026-10-25 runs (synthetic input, run totals):
+
+      | Run | contract_net | equal_split | first_come |
+      |---|---|---|---|
+      | RO, pool 3, 12 months, Talawa failure in month 0 | 23.5M | 18.7M | 23.5M |
+      | RO, pool 1, 12 months | 23.5M | 16.2M | 23.5M |
+      | bowser, pool 3, 12 months, Talawa failure in month 0 | 171.3M | 51.2M | 158.0M |
+
+      For RO units the Contract Net **ties** first-come. Only 4–5 villages ever have a need and every
+      one of them is served eventually, so the order doesn't change the total. The Contract Net serves the
+      highest need *first*, but a run total can't show that. For bowsers (recurring, scarce
+      every month) it beats both baselines.
 
 ### Week 7–8 — full negotiation
 
-- [ ] Scale to all 11 VillageAgents and 12 simulated months.
-- [ ] Carry state across months: a village with an RO unit placed last month needs less this month.
-- [ ] Exercise `failure` and re-offer at least once in the demo run.
-- [ ] Record per month: rounds used, messages sent, villages served, unserved high-risk villages.
+- [x] Scale to all 11 VillageAgents and 12 simulated months.
+- [x] Carry state across months: a village with an RO unit placed last month needs less this month.
+      (It refuses later RO CFPs.)
+- [x] Exercise `failure` and re-offer at least once in the demo run
+      (`--simulate-delivery-failure Talawa:0`, a simulated scenario).
+- [x] Record per month: rounds used, messages sent, villages served, unserved high-risk villages.
+      (`run_manifest.json` `month_status[].rounds`/`round_award_statuses`; evaluator
+      `negotiation_rounds` / `negotiation_logged_event_rows`; round files list refusals.)
 
 ## 5. Interfaces
 

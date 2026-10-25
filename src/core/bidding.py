@@ -36,6 +36,16 @@ def has_need(tier: str | None) -> bool:
     return tier in POOR_OR_WORSE
 
 
+# An RO unit, once placed, serves the village for many months (Part C brief, section 3), so a village
+# that already holds one does not bid for another. Bowser trips are recurring and carry nothing over.
+DURABLE_RESOURCES = frozenset({"RO_unit"})
+
+
+def holds_durable_unit(resource: str, held_resources: Mapping[str, int]) -> bool:
+    """True when ``resource`` is durable and the village already holds one (resource -> month_index placed)."""
+    return resource in DURABLE_RESOURCES and resource in held_resources
+
+
 def bid(risk: float, population: int) -> float:
     """Raw need score for one village: risk x population."""
     if _is_missing(risk):

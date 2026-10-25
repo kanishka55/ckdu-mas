@@ -1,4 +1,8 @@
-# Member A — Data layer, WellMonitorAgent, VillageAgent
+# Member A — Data layer, ClockAgent, WellMonitorAgent
+
+> **Ownership change (2026-10-25, team agreement):** agents are split in message-flow order. A owns
+> the first two agents, ClockAgent and WellMonitorAgent. VillageAgent moved to Member C
+> (`member_c_contract_net.md`). The file name is kept so existing links still work.
 
 Branch: `feat/a-data`  ·  Overview: [team_split.md](../team_split.md)  ·  Rules: `CLAUDE.md`
 
@@ -16,8 +20,8 @@ schema you settle on in week 3 is the one the whole team lives with.
 | `src/sim/load_data.py` | Load raw CSVs + `synthetic_wells.csv` into tidy pandas frames. |
 | `src/core/wells.py` | Well/village record schema, validation, real-vs-synthetic guard. Pure — no SPADE imports. |
 | `src/core/bidding.py` | The bid function. Pure, unit-tested. |
-| `src/agents/well_monitor.py` | WellMonitorAgent — ingests monthly readings per village. |
-| `src/agents/village.py` | VillageAgent — 11 instances, one per DS division. Holds local wells, bids, answers CFPs. |
+| `src/agents/clock.py` | ClockAgent — broadcasts the simulated "new month" tick (month_index, calendar month, season). |
+| `src/agents/well_monitor.py` | WellMonitorAgent — on each tick, sends each village's readings for that month. |
 | `tests/test_wells.py`, `tests/test_bidding.py` | Your tests. |
 
 ## 2. What is already in the repo
@@ -66,11 +70,14 @@ schema you settle on in week 3 is the one the whole team lives with.
 
 ### Week 5–6 — the two agents
 
-- [ ] `WellMonitorAgent`: on each ClockAgent month tick, emit that month's readings for its village.
+- [ ] `ClockAgent`: broadcasts one `month_tick` per simulated month (month_index, calendar month,
+      season from `wells.season_for_month`). Every send has a timeout; every message logged.
+      (An implementation exists in `src/agents/clock.py`, written by Nadun on 2026-10-21 before the
+      ownership change. A now owns, reviews and maintains it.)
+- [x] `WellMonitorAgent`: on each ClockAgent month tick, emit that month's readings for its village.
       Every `receive()` needs a timeout. Log every message through D's `msg_log`.
-- [ ] `VillageAgent`: 11 instances. Holds its own wells only — **no agent sees the full picture**,
-      that is the point of the architecture. On a `cfp` it computes a bid and replies `propose`,
-      or `refuse` if it has no need that month.
+- VillageAgent moved to Member C on 2026-10-25. A wrote the first version (including the refuse
+  rules and RO carry-over); C now owns it.
 
 ### Week 7–8 — bidding
 

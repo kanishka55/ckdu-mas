@@ -14,12 +14,17 @@ import html
 import json
 import math
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from src.sim.evaluate import (
+# `streamlit run dashboard/app.py` only puts dashboard/ on the import path; add the project root so
+# `src` imports work outside Docker too (Docker sets PYTHONPATH=/app). Same as dashboard/risk_map.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.sim.evaluate import (  # noqa: E402
     AllocationRow,
     EvaluationInputError,
     MetricResult,
@@ -294,7 +299,37 @@ def _load_team_allocations(path: Path) -> tuple[tuple[AllocationRow, ...], str]:
         return (), f"Incomplete: {exc}"
     if not records:
         return (), "Empty: allocation file has no rows"
+    if _produced_by_simulation_run(path):
+        return records, SIMULATION_ALLOCATION_STATUS
     return records, "Present but unverified: Member C output provenance is not confirmed"
+
+
+SIMULATION_ALLOCATION_STATUS = (
+    "Available: produced by this simulation run from synthetic input (run_manifest.json); "
+    "illustrative results, not real-world validation"
+)
+
+
+def _produced_by_simulation_run(allocations_path: Path) -> bool:
+    """True when ``<run>/logs/allocations.csv`` sits in a src.sim.runner output that attests it.
+
+    The runner records in ``run_manifest.json`` that it wrote these rows itself, with the
+    equal-split/first-come baselines, from synthetic input. Files without such a manifest (e.g.
+    the project's own logs/) keep the unverified label.
+    """
+    manifest_path = allocations_path.parent.parent / "run_manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    evidence = manifest.get("allocation_evidence") if isinstance(manifest, Mapping) else None
+    if not isinstance(evidence, Mapping):
+        return False
+    return (evidence.get("team_output_attestation") is True
+            # the runner records an OS-specific relative path (logs\allocations.csv on Windows)
+            and str(evidence.get("path", "")).replace("\\", "/") == "logs/allocations.csv"
+            and set(evidence.get("baselines_supplied") or ()) == {"equal_split", "first_come"}
+            and "synthetic" in str(evidence.get("attestation_scope", "")))
 
 
 def load_dashboard_data(
@@ -1863,6 +1898,8 @@ def main() -> None:
         allocations_path=logs_root / "allocations.csv", evaluation_path=logs_root / "evaluation_summary.csv",
     )
     demo = view.startswith("Illustrative")
+    simulation_allocations = (not demo
+                              and data.team_allocation_status == SIMULATION_ALLOCATION_STATUS)
     risk_months = available_months(data, demo=demo)
     selected_index = st.selectbox("Simulated month index", risk_months if risk_months else
                                   ["Unavailable — no risk month_index"], disabled=not risk_months)
@@ -1883,17 +1920,21 @@ def main() -> None:
     else:
         risks, allocations = data.team_risks, data.team_allocations
         # Use the evaluator's allocation scope, but withhold numeric allocation
-        # results while the loaded Member C rows remain unverified.
+        # results unless the rows come from an attested simulation run.
         metrics = _metrics_for_month(
-            data.team_metrics, allocation_month or -1, allocation_results_verified=False,
+            data.team_metrics, allocation_month or -1,
+            allocation_results_verified=simulation_allocations,
         )
         risk_status = f"{data.team_risk_status}; {data.team_risk_source_label}"
         allocation_label = data.team_allocation_status
 
     if not demo:
         _render_evaluation_summary(
-            st, data.team_metrics, allocation_results_verified=False,
-            context="Evaluator outputs are reported as recorded; allocation metrics stay unavailable until their inputs and provenance are verified.",
+            st, data.team_metrics, allocation_results_verified=simulation_allocations,
+            context=("Evaluator outputs from this simulation run (synthetic input); allocation "
+                     "comparisons are illustrative, not real-world validation."
+                     if simulation_allocations else
+                     "Evaluator outputs are reported as recorded; allocation metrics stay unavailable until their inputs and provenance are verified."),
         )
 
     left, right = st.columns((3, 2))
@@ -1914,7 +1955,10 @@ def main() -> None:
     st.subheader("Monthly allocation file rows and comparisons")
     if not demo and data.team_allocation_status.startswith("Present but unverified"):
         st.warning("Allocation file is present, but its Member C provenance is unverified. Rows below are not presented as confirmed team outcomes.")
-    _show_allocations(st, allocations, allocation_month, metrics, allocation_label)
+    # Simulation-run rows need no extra caption: the evaluation summary above already states
+    # they come from this run's synthetic input.
+    _show_allocations(st, allocations, allocation_month, metrics,
+                      "" if simulation_allocations else allocation_label)
 
     with st.expander("Member B per-well scores"):
         if data.team_wells.rows:

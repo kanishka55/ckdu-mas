@@ -100,3 +100,16 @@ Changed on 2026-10-17: the first draft divided by `distance_to_depot_km`. In the
 made Padaviya (tier Poor, 68 km) bid less than Kandy (tier Good), i.e. the most remote at-risk
 villages were served last. Distance was removed from the need score. The current coordinator ranks
 only normalized `risk × population` bids; a separate delivery-cost policy has not been implemented.
+
+## Allocation comparison (`src/core/allocation.py`, added 2026-10-25)
+
+Modelling assumptions, not findings:
+- **Risk weight** for "risk-weighted population served" = the village median WQI that month if its tier
+  is Poor, Very Poor or Unsuitable, else 0. It reuses the published WQI-100 class boundary already used
+  for bidding (`bidding.has_need`). Plain WQI was rejected: it credited serving Good-tier villages, so
+  equal split "won" by serving large villages with no need. Needs team sign-off.
+- **Equal split** spreads a pool that cannot be split evenly within one month (3 units, 11 villages) evenly
+  over time: a round-robin in name order.
+- **RO units are durable**: one per village, kept for the rest of the run. Bowsers are recurring.
+- **Delivery failures** exist only through `--simulate-delivery-failure`; they are a protocol test, not data.
+

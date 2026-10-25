@@ -3,7 +3,7 @@ import math
 import pytest
 
 from src.core import risk_tiers
-from src.core.bidding import bid, has_need, normalise_bids, rank_bids
+from src.core.bidding import bid, has_need, holds_durable_unit, normalise_bids, rank_bids
 from src.sim.load_data import load_wqi_method
 
 
@@ -88,3 +88,13 @@ def test_identical_bids_tie_break_by_name():
 
 def test_rank_highest_first():
     assert rank_bids({"A": 0.1, "B": 0.9})[0] == ("B", 0.9)
+
+
+def test_ro_unit_is_durable_and_blocks_a_second_bid():
+    assert holds_durable_unit("RO_unit", {"RO_unit": 3})
+    assert not holds_durable_unit("RO_unit", {})
+
+
+def test_bowser_is_recurring_and_never_held():
+    assert not holds_durable_unit("bowser", {"RO_unit": 3})
+    assert not holds_durable_unit("bowser", {"bowser": 3})

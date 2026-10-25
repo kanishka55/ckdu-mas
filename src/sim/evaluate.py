@@ -275,6 +275,7 @@ def calculate_allocation_efficiency(
     *,
     allocation_results_verified: bool = False,
     risk_weight_definition: str | None = None,
+    evaluated_month_resources: Sequence[tuple[int, str]] | None = None,
 ) -> list[MetricResult]:
     """Calculate documented risk-weighted population only with explicit evidence.
 
@@ -282,7 +283,14 @@ def calculate_allocation_efficiency(
     team outputs, not fixtures. ``risk_weight_definition`` records the agreed
     scalar-risk definition. Both are mandatory; maps alone do not establish
     provenance or scientific meaning.
+
+    ``evaluated_month_resources`` is a further caller attestation: every method was
+    computed for each listed (month, resource). A method with no rows there then
+    served nobody (0) instead of being missing, which is the normal case for durable
+    units once every village with a need holds one. With it, run totals per method
+    are also reported (scope ``all;resource=...``). Without it, behaviour is unchanged.
     """
+    evaluated = set(evaluated_month_resources or ())
     metric = "allocation_efficiency"
     groups: dict[tuple[int, str, str], set[str]] = defaultdict(set)
     for row in allocation_rows:
@@ -304,7 +312,7 @@ def calculate_allocation_efficiency(
         missing_methods = sorted({
             method for month, resource, _method in groups
             for method in ALLOCATION_METHODS
-            if not groups.get((month, resource, method))
+            if not groups.get((month, resource, method)) and (month, resource) not in evaluated
         })
         if missing_methods:
             missing.append("allocation baseline method rows: " + ", ".join(missing_methods))
@@ -331,12 +339,14 @@ def calculate_allocation_efficiency(
         return [MetricResult(metric, "all", None, "risk-weighted persons", "unavailable", 0,
                              {"reason": reason, **details})]
 
-    month_resources = sorted({(month, resource) for month, resource, _ in groups})
+    month_resources = sorted({(month, resource) for month, resource, _ in groups} | evaluated)
     results: list[MetricResult] = []
+    totals: dict[tuple[str, str], float] = defaultdict(float)
     for month, resource in month_resources:
         scope = f"month={month};resource={resource}"
         absent_methods = [method for method in ALLOCATION_METHODS
-                          if not groups.get((month, resource, method))]
+                          if not groups.get((month, resource, method))
+                          and (month, resource) not in evaluated]
         if absent_methods:
             reason = f"required allocation method rows are missing: {', '.join(absent_methods)}"
             for method in ALLOCATION_METHODS:
@@ -353,7 +363,7 @@ def calculate_allocation_efficiency(
             villages = groups.get((month, resource, method))
             served[method] = len(villages or ())
             if not villages:
-                scores[method] = None
+                scores[method] = 0.0 if (month, resource) in evaluated else None
                 continue
             score = 0.0
             for village in villages:
@@ -369,6 +379,8 @@ def calculate_allocation_efficiency(
             scores[method] = score
         for method in ALLOCATION_METHODS:
             value = scores[method]
+            if value is not None and (month, resource) in evaluated:
+                totals[(resource, method)] += value
             results.append(MetricResult(
                 "risk_weighted_population_served", f"{scope};method={method}", value,
                 "risk-weighted persons", "ok" if value is not None else "unavailable",
@@ -384,6 +396,20 @@ def calculate_allocation_efficiency(
                 {"risk_weight_definition": risk_weight_definition} if available else
                 {"reason": f"missing {('contract_net' if cn is None else baseline)} baseline rows"},
             ))
+    for resource in sorted({resource for _month, resource in evaluated}):
+        scope = f"all;resource={resource}"
+        months_counted = sum(1 for _month, r in evaluated if r == resource)
+        details = {"risk_weight_definition": risk_weight_definition,
+                   "aggregation": "sum over evaluated months"}
+        for method in ALLOCATION_METHODS:
+            results.append(MetricResult(
+                "risk_weighted_population_served", f"{scope};method={method}",
+                totals[(resource, method)], "risk-weighted persons", "ok", months_counted, details))
+        for baseline in ("equal_split", "first_come"):
+            results.append(MetricResult(
+                f"contract_net_minus_{baseline}", scope,
+                totals[(resource, "contract_net")] - totals[(resource, baseline)],
+                "risk-weighted persons", "ok", months_counted, details))
     return results
 
 
@@ -602,6 +628,7 @@ def evaluate(
     allocation_results_verified: bool = False,
     risk_weight_definition: str | None = None,
     negotiation_history_complete: bool = False,
+    evaluated_month_resources: Sequence[tuple[int, str]] | None = None,
 ) -> list[MetricResult]:
     """Evaluate available evidence, write the documented CSV and print a table.
 
@@ -639,6 +666,7 @@ def evaluate(
                 allocations, population_by_village, risk_weight_by_village_month,
                 allocation_results_verified=allocation_results_verified,
                 risk_weight_definition=risk_weight_definition,
+                evaluated_month_resources=evaluated_month_resources,
             ))
         except EvaluationInputError:
             reason = "allocation input or supporting values failed validation"

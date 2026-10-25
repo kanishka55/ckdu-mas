@@ -5,6 +5,9 @@ current risk, nothing about the other villages. Bid logic lives in src/core/bidd
 It bids only when its tier is Poor or worse (``bidding.has_need``); otherwise it refuses.
 ``distance_to_depot_km`` is kept as village data but is not part of the bid (delivery cost is the
 coordinator's concern).
+A village that already holds an RO unit refuses later RO CFPs (``bidding.holds_durable_unit``). In a
+simulated delivery-failure month it answers ``accept-proposal`` with ``failure`` and refuses any
+re-offer round that month.
 
 Two behaviours, split by message template so neither steals the other's messages:
 - RespondToCfp: cfp / accept-proposal / reject-proposal (the Contract Net conversation)
@@ -42,11 +45,18 @@ class VillageAgent(Agent):
         population: int,
         distance_to_depot_km: float,
         local_wells: pd.DataFrame | None = None,
+        delivery_failure_months: frozenset[int] = frozenset(),
         **kwargs,
     ):
         super().__init__(jid, password, **kwargs)
         self.ds_division = ds_division
         self.population = population
+        # Durable units this village holds: resource -> month_index it was placed (bidding.DURABLE_RESOURCES).
+        self.held_resources: dict[str, int] = {}
+        # Simulated scenario only: months in which this village cannot take delivery of an award, so it
+        # answers accept-proposal with `failure` (exercises the coordinator's re-offer).
+        self.delivery_failure_months = frozenset(delivery_failure_months)
+        self.failed_delivery_months: set[int] = set()
         self.distance_to_depot_km = distance_to_depot_km
         self.local_wells = self._own_wells_only(local_wells)
         self.risk: float | None = None
@@ -106,6 +116,18 @@ class VillageAgent(Agent):
                                   {"type": "refuse", **base, "reason": reason}, msg.thread)
 
             month_index = cfp["month_index"]
+            if bidding.holds_durable_unit(cfp["resource"], agent.held_resources):
+                placed = agent.held_resources[cfp["resource"]]
+                await refuse(f"already holds an {cfp['resource']} (placed month_index {placed})")
+                return
+            if month_index in agent.failed_delivery_months:
+                await refuse("cannot take delivery this month")
+                return
+            if any(a.get("month_index") == month_index and a.get("resource") == cfp["resource"]
+                   for a in agent.allocations):
+                # one unit per village per month: a re-offer round is for villages not yet served
+                await refuse(f"already received a {cfp['resource']} this month")
+                return
             if (not isinstance(month_index, int) or isinstance(month_index, bool)
                     or not isinstance(agent.risk_month_index, int)
                     or isinstance(agent.risk_month_index, bool)
@@ -148,7 +170,16 @@ class VillageAgent(Agent):
             if performative == ontology.CFP:
                 await self.handle_cfp(reply, decision)  # a new round started; answer it
             elif performative == ontology.ACCEPT_PROPOSAL:
+                if month_index in agent.delivery_failure_months:
+                    agent.failed_delivery_months.add(month_index)
+                    await common.send(self, coordinator, ontology.FAILURE, {
+                        "type": "failure", **base,
+                        "reason": "simulated scenario: site cannot take delivery this month",
+                    }, reply.thread)
+                    return
                 agent.allocations.append(decision)
+                if decision["resource"] in bidding.DURABLE_RESOURCES:
+                    agent.held_resources[decision["resource"]] = month_index
                 await common.send(self, coordinator, ontology.INFORM, {
                     "type": "inform_done", **base,
                     "resource": decision["resource"], "units": decision["units"],

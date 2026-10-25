@@ -31,7 +31,7 @@ from src.agents.resource_coordinator import ResourceCoordinatorAgent
 from src.agents.risk_scoring import RiskScoringAgent
 from src.agents.village import VillageAgent
 from src.agents.well_monitor import WellMonitorAgent
-from src.core import contract_net, msg_log, ontology, risk_tiers, wells, wqi
+from src.core import allocation, bidding, contract_net, msg_log, ontology, risk_tiers, wells, wqi
 from src.core.hotspot_screening import ScreeningRule
 from src.sim import load_data, risk_outputs
 from src.sim.event_journal import append_event, register_run
@@ -42,6 +42,7 @@ DEFAULT_INPUT = ROOT / "data/processed/synthetic_wells.csv"
 DEFAULT_METHOD = ROOT / "data/raw/ckdu_02_wqi_method_and_thresholds.csv"
 DEFAULT_DIVISIONS = ROOT / "data/raw/ckdu_03_sampling_design_ds_divisions.csv"
 MANIFEST_NAME = "run_manifest.json"
+RISK_WEIGHT_DEFINITION = allocation.RISK_WEIGHT_DEFINITION
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,11 @@ class SimulationConfig:
     method_path: Path = DEFAULT_METHOD
     divisions_path: Path = DEFAULT_DIVISIONS
     hotspot_rule: ScreeningRule | None = None
+    # Re-offer: a month runs up to max_rounds CFP rounds; a new round only re-offers units freed by a
+    # `failure` or an unconfirmed award. 1 keeps the original single-round behaviour.
+    max_rounds: int = 3
+    # Simulated scenario only: (ds_division, month_index) pairs where that village cannot take delivery.
+    delivery_failures: frozenset[tuple[str, int]] = frozenset()
 
     def __post_init__(self) -> None:
         for field_name, value in (("start_month_index", self.start_month_index),
@@ -102,6 +108,9 @@ class SimulationConfig:
                                   ("round_number", self.round_number)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{field_name} must be a non-negative integer")
+        if isinstance(self.max_rounds, bool) or not isinstance(self.max_rounds, int) or self.max_rounds < 1:
+            raise ValueError("max_rounds must be a positive integer")
+        object.__setattr__(self, "delivery_failures", frozenset(self.delivery_failures))
         if self.end_month_index < self.start_month_index:
             raise ValueError("end_month_index must be >= start_month_index")
         if self.resource not in ontology.RESOURCES:
@@ -203,11 +212,12 @@ def _write_confirmed_allocation_rows(
     output_root: Path,
     round_result_paths: Sequence[str],
     calendar_month_by_index: Mapping[int, int],
+    baseline_rows: Sequence[Mapping[str, Any]] = (),
 ) -> Path:
-    """Export confirmed Contract Net awards in the evaluator's existing row schema.
+    """Export confirmed Contract Net awards (and baseline rows) in the evaluator's row schema.
 
-    This records outcomes from this synthetic run only. It does not create
-    equal-split/first-come baselines or attest scientific/team provenance.
+    This records outcomes from this synthetic run only; it does not attest scientific or
+    real-world provenance. ``baseline_rows`` come from ``_baseline_allocation_rows``.
     """
     path = output_root / "logs" / "allocations.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -248,7 +258,65 @@ def _write_confirmed_allocation_rows(
         writer = csv.DictWriter(stream, fieldnames=ALLOCATION_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
+        writer.writerows(baseline_rows)
     return path
+
+
+def _baseline_allocation_rows(
+    output_root: Path,
+    round_result_paths: Sequence[str],
+    risk_records: Sequence[Mapping[str, Any]],
+    population_by_division: Mapping[str, int],
+    division_by_jid: Mapping[str, str],
+    message_log_path: Path,
+    config: "SimulationConfig",
+) -> list[dict[str, Any]]:
+    """Equal-split and first-come allocations for the months the Contract Net ran.
+
+    Same pool, same months, same durable-unit rule as the Contract Net, each method with its own
+    holdings. First-come uses the real order in which round-1 replies reached the coordinator
+    (received propose/refuse rows in the message log). Logic lives in src/core/allocation.py.
+    """
+    round1: dict[int, Mapping[str, Any]] = {}
+    for relative in round_result_paths:
+        result = json.loads((output_root / relative).read_text(encoding="utf-8"))
+        if result.get("round") == config.round_number:
+            round1[result["month_index"]] = result
+    arrivals: dict[str, list[str]] = {}
+    with message_log_path.open(newline="", encoding="utf-8") as stream:
+        for row in csv.DictReader(stream):
+            if row["direction"] == "received" and row["performative"] in (ontology.PROPOSE, ontology.REFUSE):
+                division = division_by_jid.get(row["sender"].split("/")[0])
+                order = arrivals.setdefault(row["thread_id"], [])
+                if division and division not in order:
+                    order.append(division)
+    risk = {(r["ds_division"], r["month_index"]): r for r in risk_records}
+    villages = sorted(population_by_division)
+    durable = config.resource in bidding.DURABLE_RESOURCES
+    held = {"equal_split": set(), "first_come": set()}
+    rotation = 0
+    rows: list[dict[str, Any]] = []
+    for month_index in sorted(round1):
+        unavailable = {d for d, m in config.delivery_failures if m == month_index}
+        needy = {v for v in villages
+                 if bidding.has_need((risk.get((v, month_index)) or {}).get("tier"))}
+        equal, rotation = allocation.allocate_equal_split(
+            villages, config.resource_pool, rotation, held["equal_split"], unavailable)
+        first = allocation.allocate_first_come(
+            arrivals.get(round1[month_index]["thread_id"], []), config.resource_pool, needy,
+            held["first_come"], unavailable)
+        for method, winners in (("equal_split", equal), ("first_come", first)):
+            for village in winners:
+                wqi = (risk.get((village, month_index)) or {}).get("wqi")
+                rows.append({
+                    "month": config.calendar_month_by_index[month_index], "resource": config.resource,
+                    "ds_division": village, "round": config.round_number,
+                    "winning_bid": bidding.bid(wqi, population_by_division[village]) if wqi is not None else 0.0,
+                    "method": method,
+                })
+                if durable:
+                    held[method].add(village)
+    return rows
 
 
 def _rewrite_owned_json(path: Path, value: Any) -> None:
@@ -343,6 +411,26 @@ def _read_message_counts(path: Path) -> dict[str, Any]:
             "by_performative": dict(sorted(by_performative.items()))}
 
 
+def _month_award_status(round_statuses: Sequence[str]) -> str:
+    """One Contract Net outcome for a month from its round statuses (round 1 first).
+
+    A single round keeps the coordinator's own status. After a re-offer the month is judged by the
+    last round: ``confirmed`` -> ``confirmed_after_reoffer``; ``no_award`` (nobody else needed the
+    freed unit) -> ``reoffer_no_eligible_bidder``, a valid negotiation outcome; anything else
+    (e.g. another failure) is reported as that round's status.
+    """
+    if not round_statuses:
+        return "no_round_result"
+    if len(round_statuses) == 1:
+        return round_statuses[0]
+    last = round_statuses[-1]
+    if last == "confirmed":
+        return "confirmed_after_reoffer"
+    if last == "no_award":
+        return "reoffer_no_eligible_bidder"
+    return last
+
+
 def _has_operational_gaps(
     stage_status: Mapping[str, Any],
     months: Sequence[Mapping[str, Any]],
@@ -362,7 +450,7 @@ def _has_operational_gaps(
         "hotspot_screening": {"screening_outputs_recorded"},
         "hotspot_agent": {"processed_risk_records"},
         "alert_decisions": {"processed_typed_risk_and_hotspot_messages"},
-        "contract_net": {"single_round_per_completed_month"},
+        "contract_net": {"bounded_rounds_per_completed_month"},
     }
     for stage, accepted in required_stage_values.items():
         if stage_status.get(stage) not in accepted:
@@ -415,21 +503,23 @@ def _has_complete_negotiation_history(
     """Attest complete round evidence before enabling evaluator negotiation metrics.
 
     The evaluator still validates message threads and sent/received event identities. This
-    additional gate only confirms that every month with completed risk delivery has a persisted
-    round result with one response per configured recipient and no recorded missing, malformed,
-    unmatched, timed-out, or protocol-error evidence.
+    additional gate only confirms that every month with completed risk delivery has persisted
+    round results with one response per configured recipient and no recorded missing, malformed,
+    unmatched, timed-out, or protocol-error evidence. A month may have several rounds (re-offer);
+    they must be numbered consecutively from ``round_number`` with distinct thread ids.
     """
     expected_months = {
         item.get("month_index") for item in month_status
         if item.get("risk_delivery") == "complete"
     }
-    if not expected_months or not round_result_paths or len(round_result_paths) != len(expected_months):
+    if not expected_months or not round_result_paths:
         return False
     if (isinstance(recipient_count, bool) or not isinstance(recipient_count, int)
             or recipient_count < 1):
         return False
 
-    seen_months: set[int] = set()
+    rounds_by_month: dict[int, list[int]] = {}
+    thread_ids: set[str] = set()
     for relative_path in round_result_paths:
         path = Path(relative_path)
         if path.is_absolute() or ".." in path.parts:
@@ -441,10 +531,13 @@ def _has_complete_negotiation_history(
         if not isinstance(result, Mapping):
             return False
         month_index = result.get("month_index")
-        if month_index not in expected_months or month_index in seen_months:
+        if month_index not in expected_months:
             return False
-        if result.get("round") != round_number or not result.get("thread_id"):
+        thread_id = result.get("thread_id")
+        if (isinstance(result.get("round"), bool) or not isinstance(result.get("round"), int)
+                or not thread_id or thread_id in thread_ids):
             return False
+        thread_ids.add(thread_id)
         if result.get("state_history", [])[-1:] != ["DONE"]:
             return False
         for field in ("missing_recipients", "timed_out_recipients", "malformed_replies",
@@ -471,9 +564,14 @@ def _has_complete_negotiation_history(
             for awardee in awardees
         ):
             return False
-        seen_months.add(month_index)
+        rounds_by_month.setdefault(month_index, []).append(result["round"])
 
-    return seen_months == expected_months
+    if set(rounds_by_month) != expected_months:
+        return False
+    return all(
+        sorted(rounds) == list(range(round_number, round_number + len(rounds)))
+        for rounds in rounds_by_month.values()
+    )
 
 
 async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
@@ -510,7 +608,9 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             "not_new_monthly_measurements": True,
             "reduced_parameter_wqi": True,
             "ckdu_diagnostic_or_causal_claim": False,
-            "contract_net": "existing single-round SPADE coordinator; not a multi-round convergence implementation",
+            "contract_net": ("SPADE coordinator, one bounded round per CFP; extra rounds only re-offer units "
+                             "freed by failure/unconfirmed awards (max_rounds); delivery failures are a "
+                             "simulated scenario"),
             "hotspot": "project-defined screening only; not a validated medical or epidemiological model",
             "alerts": "typed SPADE flow to run-local simulated inbox; not a real health-officer endpoint",
         },
@@ -521,6 +621,9 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             "resource": config.resource,
             "resource_pool": config.resource_pool,
             "round_number": config.round_number,
+            "max_rounds": config.max_rounds,
+            "simulated_delivery_failures": [
+                {"ds_division": d, "month_index": m} for d, m in sorted(config.delivery_failures)],
             "proposal_timeout_s": config.proposal_timeout_s,
             "confirmation_timeout_s": config.confirmation_timeout_s,
             "stage_timeout_s": config.stage_timeout_s,
@@ -600,7 +703,13 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             population=int(divisions_indexed.loc[name, "population"]),
             distance_to_depot_km=float(divisions_indexed.loc[name, "distance_to_depot_km"]),
             local_wells=monthly[monthly["ds_division"] == name],
+            delivery_failure_months=frozenset(
+                month for division, month in config.delivery_failures if division == name),
         ) for name in divisions]
+        unknown_failure_divisions = {d for d, _ in config.delivery_failures} - set(divisions)
+        if unknown_failure_divisions:
+            raise ValueError(f"--simulate-delivery-failure names unknown divisions: "
+                             f"{sorted(unknown_failure_divisions)}")
         collector = RiskRecordCollectorAgent(collector_jid, config.password, receive_timeout_s=1.0)
         hotspot_jid = _jid(config.agent_identities.hotspot, config.domain)
         hotspot_agent = HotspotAgent(
@@ -773,94 +882,116 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                                       contract_net=month_status["contract_net"])
                 continue
 
-            coordinator_jid = _jid(f"{config.agent_identities.coordinator_prefix}{month_index}", config.domain)
-            round_path = round_dir / f"month_index_{month_index:04d}_round_{config.round_number}.json"
-            coordinator_config = contract_net.CoordinatorConfig(
-                month_index=month_index, round_number=config.round_number,
-                resource=config.resource, resource_pool=config.resource_pool,
-                recipients=[contract_net.VillageRecipient(village_jids[name], name) for name in divisions],
-                proposal_timeout_s=config.proposal_timeout_s,
-                confirmation_timeout_s=config.confirmation_timeout_s,
-                output_path=round_path,
-                thread_id=f"ckdu-{_slug(run_id)}-month-{month_index}-round-{config.round_number}",
-                provenance="synthetic-input SPADE simulation; single bounded Contract Net round",
-            )
-            coordinator = ResourceCoordinatorAgent(coordinator_jid, config.password, coordinator_config)
-            coordinator.message_log_path = message_log_path
-            name = f"ResourceCoordinatorAgent:month_index={month_index}:round={config.round_number}"
-            coordinator.event_journal_path = event_path
-            coordinator.run_id = run_id
-            coordinator.monitor_component = name
-            coordinator.monitor_behavior_failures = []
-            _append_monitor_event(event_path, "agent_starting", name, identity=coordinator_jid)
-            try:
-                await coordinator.start(auto_register=True)
-            except Exception:
-                _append_monitor_event(event_path, "agent_start_failed", name,
-                                      identity=str(coordinator.jid), lifecycle_state="start_failed")
-                lifecycle.append({"component": name, "event": "start_failed", "at": _utc_now(),
-                                  "jid": str(coordinator.jid)})
-                raise
-            started_agents.append((name, coordinator))
-            _append_monitor_event(event_path, "agent_started", name, identity=str(coordinator.jid),
-                                  lifecycle_state="started")
-            lifecycle.append({"component": name, "event": "started", "at": _utc_now(),
-                              "jid": str(coordinator.jid)})
-            common.add_agent_heartbeat(coordinator)
-            behaviour = next(iter(coordinator.behaviours))
-            try:
-                await asyncio.wait_for(
-                    behaviour.join(),
-                    timeout=config.proposal_timeout_s + config.confirmation_timeout_s + 15.0,
+            # Round 1 is the normal CFP. Later rounds only re-offer units freed by a `failure` or an
+            # unconfirmed award; villages that already hold the unit or failed this month refuse them.
+            units_left = config.resource_pool
+            round_statuses: list[str] = []
+            round_failed = False
+            for round_number in range(config.round_number, config.round_number + config.max_rounds):
+                coordinator_jid = _jid(f"{config.agent_identities.coordinator_prefix}{month_index}"
+                                       + ("" if round_number == config.round_number else f"_r{round_number}"),
+                                       config.domain)
+                round_path = round_dir / f"month_index_{month_index:04d}_round_{round_number}.json"
+                coordinator_config = contract_net.CoordinatorConfig(
+                    month_index=month_index, round_number=round_number,
+                    resource=config.resource, resource_pool=units_left,
+                    recipients=[contract_net.VillageRecipient(village_jids[name], name) for name in divisions],
+                    proposal_timeout_s=config.proposal_timeout_s,
+                    confirmation_timeout_s=config.confirmation_timeout_s,
+                    output_path=round_path,
+                    thread_id=f"ckdu-{_slug(run_id)}-month-{month_index}-round-{round_number}",
+                    provenance=("synthetic-input SPADE simulation; bounded Contract Net round"
+                                + ("" if round_number == config.round_number
+                                   else "; re-offer of units freed by failure/unconfirmed awards")),
                 )
-                round_outcome = coordinator.round_result
-                if round_outcome is None:
-                    _append_monitor_event(event_path, "agent_work_failed", name,
-                                          identity=str(coordinator.jid), month_index=month_index,
-                                          round=config.round_number, outcome="unavailable_no_round_result")
-                elif (coordinator.monitor_behavior_failures
-                      or round_outcome.get("award_status") == "protocol_error"):
-                    _append_monitor_event(event_path, "agent_work_failed", name,
-                                          identity=str(coordinator.jid), month_index=month_index,
-                                          round=config.round_number,
-                                          outcome=round_outcome.get("award_status"))
-                else:
-                    _append_monitor_event(event_path, "agent_work_completed", name,
-                                          identity=str(coordinator.jid), month_index=month_index,
-                                          round=config.round_number,
-                                          outcome=round_outcome.get("award_status"))
-            finally:
+                coordinator = ResourceCoordinatorAgent(coordinator_jid, config.password, coordinator_config)
+                coordinator.message_log_path = message_log_path
+                name = f"ResourceCoordinatorAgent:month_index={month_index}:round={round_number}"
+                coordinator.event_journal_path = event_path
+                coordinator.run_id = run_id
+                coordinator.monitor_component = name
+                coordinator.monitor_behavior_failures = []
+                _append_monitor_event(event_path, "agent_starting", name, identity=coordinator_jid)
                 try:
-                    await coordinator.stop()
-                except Exception as exc:
-                    failures.append({"stage": f"shutdown:{name}",
-                                     "error": f"{type(exc).__name__}: {exc}"})
-                    _append_monitor_event(event_path, "agent_stop_failed", name,
-                                          identity=str(coordinator.jid), lifecycle_state="stop_failed")
-                    lifecycle.append({"component": name, "event": "stop_failed", "at": _utc_now(),
+                    await coordinator.start(auto_register=True)
+                except Exception:
+                    _append_monitor_event(event_path, "agent_start_failed", name,
+                                          identity=str(coordinator.jid), lifecycle_state="start_failed")
+                    lifecycle.append({"component": name, "event": "start_failed", "at": _utc_now(),
                                       "jid": str(coordinator.jid)})
+                    raise
+                started_agents.append((name, coordinator))
+                _append_monitor_event(event_path, "agent_started", name, identity=str(coordinator.jid),
+                                      lifecycle_state="started")
+                lifecycle.append({"component": name, "event": "started", "at": _utc_now(),
+                                  "jid": str(coordinator.jid)})
+                common.add_agent_heartbeat(coordinator)
+                behaviour = next(iter(coordinator.behaviours))
+                try:
+                    await asyncio.wait_for(
+                        behaviour.join(),
+                        timeout=config.proposal_timeout_s + config.confirmation_timeout_s + 15.0,
+                    )
+                    round_outcome = coordinator.round_result
+                    if round_outcome is None:
+                        _append_monitor_event(event_path, "agent_work_failed", name,
+                                              identity=str(coordinator.jid), month_index=month_index,
+                                              round=round_number, outcome="unavailable_no_round_result")
+                    elif (coordinator.monitor_behavior_failures
+                          or round_outcome.get("award_status") == "protocol_error"):
+                        _append_monitor_event(event_path, "agent_work_failed", name,
+                                              identity=str(coordinator.jid), month_index=month_index,
+                                              round=round_number,
+                                              outcome=round_outcome.get("award_status"))
+                    else:
+                        _append_monitor_event(event_path, "agent_work_completed", name,
+                                              identity=str(coordinator.jid), month_index=month_index,
+                                              round=round_number,
+                                              outcome=round_outcome.get("award_status"))
+                finally:
+                    try:
+                        await coordinator.stop()
+                    except Exception as exc:
+                        failures.append({"stage": f"shutdown:{name}",
+                                         "error": f"{type(exc).__name__}: {exc}"})
+                        _append_monitor_event(event_path, "agent_stop_failed", name,
+                                              identity=str(coordinator.jid), lifecycle_state="stop_failed")
+                        lifecycle.append({"component": name, "event": "stop_failed", "at": _utc_now(),
+                                          "jid": str(coordinator.jid)})
+                    else:
+                        started_agents.remove((name, coordinator))
+                        _append_monitor_event(event_path, "agent_stopped", name,
+                                              identity=str(coordinator.jid), lifecycle_state="stopped")
+                        lifecycle.append({"component": name, "event": "stopped", "at": _utc_now()})
+                if coordinator.round_result is None:
+                    month_status.update(status="incomplete", contract_net="no_round_result")
+                    round_failed = True
+                    failures.append({"stage": name, "error": "coordinator completed without a round result"})
+                    _append_monitor_event(event_path, "round_completed", name,
+                                          identity=str(coordinator.jid), month_index=month_index,
+                                          round=round_number, award_status="unavailable",
+                                          winner=None, reason="coordinator_completed_without_result")
                 else:
-                    started_agents.remove((name, coordinator))
-                    _append_monitor_event(event_path, "agent_stopped", name,
-                                          identity=str(coordinator.jid), lifecycle_state="stopped")
-                    lifecycle.append({"component": name, "event": "stopped", "at": _utc_now()})
-            if coordinator.round_result is None:
-                month_status.update(status="incomplete", contract_net="no_round_result")
-                failures.append({"stage": name, "error": "coordinator completed without a round result"})
-                _append_monitor_event(event_path, "round_completed", name,
-                                      identity=str(coordinator.jid), month_index=month_index,
-                                      round=config.round_number, award_status="unavailable",
-                                      winner=None, reason="coordinator_completed_without_result")
-            else:
-                month_status["contract_net"] = coordinator.round_result["award_status"]
+                    round_statuses.append(coordinator.round_result["award_status"])
+                    manifest["round_result_paths"].append(str(round_path.relative_to(output_root)))
+                    _append_monitor_event(event_path, "round_completed", name,
+                                          identity=str(coordinator.jid), month_index=month_index,
+                                          round=round_number,
+                                          award_status=coordinator.round_result.get("award_status"),
+                                          winner=coordinator.round_result.get("winner"),
+                                          result_path=str(round_path.relative_to(output_root)))
+                if round_failed:
+                    break
+                awardees = coordinator.round_result.get("selected_awardees", [])
+                units_left -= sum(1 for item in awardees if item.get("status") == "confirmed")
+                freed = any(item.get("status") in {"failed", "unconfirmed_timeout"} for item in awardees)
+                if units_left <= 0 or not freed:
+                    break
+            if not round_failed:
                 month_status["status"] = "complete"
-                manifest["round_result_paths"].append(str(round_path.relative_to(output_root)))
-                _append_monitor_event(event_path, "round_completed", name,
-                                      identity=str(coordinator.jid), month_index=month_index,
-                                      round=config.round_number,
-                                      award_status=coordinator.round_result.get("award_status"),
-                                      winner=coordinator.round_result.get("winner"),
-                                      result_path=str(round_path.relative_to(output_root)))
+                month_status["rounds"] = len(round_statuses)
+                month_status["round_award_statuses"] = list(round_statuses)
+                month_status["contract_net"] = _month_award_status(round_statuses)
             _append_monitor_event(event_path, "month_completed", "SimulationRunner",
                                   month_index=month_index, status=month_status["status"],
                                   contract_net=month_status["contract_net"])
@@ -883,7 +1014,7 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         )
         manifest["stage_status"]["alert_transport"] = "local_simulated_inbox_not_real_health_officer"
         manifest["stage_status"]["contract_net"] = (
-            "single_round_per_completed_month" if any(m["contract_net"] not in {
+            "bounded_rounds_per_completed_month" if any(m["contract_net"] not in {
                 "pending", "skipped_missing_current_month_risk", "no_round_result"} for m in months)
             else "unavailable_no_completed_rounds"
         )
@@ -900,21 +1031,35 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         _write_json_exclusive(output_root / "risk_records.json", risk_records)
         if config.hotspot_rule is None:
             manifest["stage_status"]["hotspot_screening"] = "unavailable_rule_not_configured"
-        allocation_path = _write_confirmed_allocation_rows(
-            output_root, manifest["round_result_paths"], config.calendar_month_by_index,
-        )
         population_by_division = {
             str(name): int(divisions_indexed.loc[name, "population"])
             for name in divisions
         }
+        baseline_rows = _baseline_allocation_rows(
+            output_root, manifest["round_result_paths"], risk_records, population_by_division,
+            {jid: name for name, jid in village_jids.items()}, log_path, config,
+        )
+        allocation_path = _write_confirmed_allocation_rows(
+            output_root, manifest["round_result_paths"], config.calendar_month_by_index, baseline_rows,
+        )
+        # Risk weight for "risk-weighted population served": need-gated WQI (allocation.risk_weight).
+        risk_weight_by_village_month = {
+            (r["ds_division"], config.calendar_month_by_index[r["month_index"]]):
+                allocation.risk_weight(r.get("wqi"), r.get("tier"))
+            for r in risk_records
+        }
         manifest["allocation_evidence"] = {
             "path": str(allocation_path.relative_to(output_root)),
-            "status": "confirmed_contract_net_rows_only",
-            "provenance": "synthetic local SPADE simulation; exported from persisted round artifacts",
-            "baselines_supplied": [],
-            "risk_weight_definition": None,
+            "status": "contract_net_and_baseline_rows_from_this_run",
+            "provenance": ("synthetic local SPADE simulation; contract_net rows exported from persisted "
+                           "round artifacts; equal_split/first_come computed by src/core/allocation.py "
+                           "for the same months, pool and durable-unit rule"),
+            "baselines_supplied": ["equal_split", "first_come"],
+            "risk_weight_definition": RISK_WEIGHT_DEFINITION,
             "population_source": str(config.divisions_path),
-            "team_output_attestation": False,
+            "team_output_attestation": True,
+            "attestation_scope": ("rows were produced by this run from synthetic input; "
+                                  "not real-world or scientific validation"),
         }
 
         def alert_risk_receipt(event: Any) -> bool:
@@ -927,6 +1072,14 @@ async def run_simulation(config: SimulationConfig) -> dict[str, Any]:
             output_path=output_root / "logs/evaluation_summary.csv",
             risk_records=risk_records or None,
             population_by_village=population_by_division,
+            risk_weight_by_village_month=risk_weight_by_village_month,
+            allocation_results_verified=True,
+            risk_weight_definition=RISK_WEIGHT_DEFINITION,
+            # Every method was computed for each month the Contract Net ran (see _baseline_allocation_rows).
+            evaluated_month_resources=sorted({
+                (config.calendar_month_by_index[json.loads((output_root / rel).read_text(encoding="utf-8"))["month_index"]],
+                 config.resource)
+                for rel in manifest["round_result_paths"]}),
             risk_input_selector=alert_risk_receipt,
             alert_correlation_records=alert_agent.records if alert_agent else None,
             negotiation_history_complete=_has_complete_negotiation_history(
@@ -1030,6 +1183,16 @@ def _parse_int_list(raw: str) -> list[int]:
         raise argparse.ArgumentTypeError("months must be comma-separated integers") from exc
 
 
+def _parse_delivery_failure(raw: str) -> tuple[str, int]:
+    division, sep, month = raw.rpartition(":")
+    try:
+        if not sep or not division.strip():
+            raise ValueError
+        return division.strip(), int(month)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected DIVISION:MONTH_INDEX, e.g. Talawa:0") from exc
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run a fresh, isolated multi-month CKDu MAS simulation")
     parser.add_argument("--start-month-index", type=int, default=0)
@@ -1042,6 +1205,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--resource", choices=sorted(ontology.RESOURCES), default="RO_unit")
     parser.add_argument("--resource-pool", type=int, default=1)
     parser.add_argument("--round-number", type=int, default=1)
+    parser.add_argument("--max-rounds", type=int, default=3,
+                        help="CFP rounds per month; rounds after the first only re-offer units freed "
+                             "by a failure or unconfirmed award (1 = single round)")
+    parser.add_argument("--simulate-delivery-failure", action="append", default=[],
+                        type=_parse_delivery_failure, metavar="DIVISION:MONTH_INDEX",
+                        help="simulated scenario: this village answers an award with `failure` in "
+                             "that month (repeatable)")
     parser.add_argument("--proposal-timeout", type=float, default=5.0)
     parser.add_argument("--confirmation-timeout", type=float, default=5.0)
     parser.add_argument("--stage-timeout", type=float, default=45.0)
@@ -1084,6 +1254,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         start_month_index=args.start_month_index, end_month_index=args.end_month_index,
         calendar_month_by_index=calendar, output_dir=args.output_dir,
         resource=args.resource, resource_pool=args.resource_pool, round_number=args.round_number,
+        max_rounds=args.max_rounds, delivery_failures=frozenset(args.simulate_delivery_failure),
         proposal_timeout_s=args.proposal_timeout, confirmation_timeout_s=args.confirmation_timeout,
         stage_timeout_s=args.stage_timeout, hotspot_stage_timeout_s=args.hotspot_stage_timeout,
         alert_stage_timeout_s=args.alert_stage_timeout,

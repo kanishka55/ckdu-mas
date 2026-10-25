@@ -1,10 +1,10 @@
-# Production Contract Net coordinator (single-round increment)
+# Production Contract Net coordinator
 
 `src/agents/resource_coordinator.py` implements one bounded SPADE Contract Net round. It is a
 distributed coordinator that exchanges ontology-validated messages with `VillageAgent`; it is not
 the toy demo and it is not the illustrative, in-process allocator in `src/core/local_allocation.py`.
-An external clock or runner can construct a configured coordinator per round. Monthly scheduling,
-state carry-over, failure re-offers, and a complete multi-month simulation remain separate work.
+The runner (`src/sim/runner.py`) constructs one configured coordinator per round. A month can have
+several rounds: later rounds re-offer units freed by a `failure` (see "Failure and re-offer" below).
 
 ## Inputs and correlation
 
@@ -34,13 +34,34 @@ choice and still needs Member C/team review. A zero pool is valid and results in
 An accept message is a selected offer, not a completed allocation. An award becomes successful
 only after a correlated ontology-valid `inform_done` confirms the configured resource and one unit.
 An ontology-valid `failure` is recorded as failed; a missing confirmation becomes
-`unconfirmed_timeout`. This increment records failure and timeout but does not re-offer a failed
-unit. The Member C task specification requires failure re-offer and multi-round convergence; those
-remain explicit follow-up work rather than being silently claimed here.
+`unconfirmed_timeout`. One coordinator instance runs one round; re-offering is done by the runner
+starting another round (next section).
 
 In the JSON result, `selected_winner` is the highest-ranked proposed awardee. `winner` is set only
 after an `inform_done` confirms an award. `allocation_successful` is true only when every selected
 award in that round is confirmed; per-award states and `confirmed_awardees` preserve partial outcomes.
+
+## Failure and re-offer (multi-round), carry-over between months (added 2026-10-25)
+
+- **Re-offer.** After a round, the runner computes the units still free (`pool − confirmed`). If any
+  award in that round ended `failed` or `unconfirmed_timeout`, it starts the next round: a new
+  coordinator (`coordinator_m<month>_r<round>`), a new thread id, `round = previous + 1`,
+  `units_available` = the freed units. At most `--max-rounds` rounds per month (default 3). Round
+  files are `rounds/month_index_XXXX_round_N.json`.
+- **Who bids in a re-offer round.** Villages decide for themselves (`src/agents/village.py`): one that
+  already received the resource this month refuses ("already received a … this month"), one that
+  failed delivery this month refuses ("cannot take delivery this month"), and RO holders refuse (next
+  point). So the freed unit goes to the next-best bidder.
+- **Carry-over.** An RO unit is durable (`bidding.DURABLE_RESOURCES`). A village that confirmed an RO
+  unit keeps it and refuses later RO CFPs ("already holds an RO_unit (placed month_index N)").
+  Bowsers are recurring, so there is no carry-over for them. Once every village with a need holds an RO
+  unit, later months end `no_award`, which is a valid outcome.
+- **Failure is a simulated scenario.** `--simulate-delivery-failure DIVISION:MONTH_INDEX` makes that
+  village answer `accept-proposal` with `failure` ("simulated scenario: site cannot take delivery
+  this month"). Nothing in the data produces failures on its own. The flag exists to exercise the protocol.
+- **Month status** (`month_status[].contract_net`): one round gives the coordinator's own status. After a
+  re-offer, `confirmed_after_reoffer` means the last round confirmed, and `reoffer_no_eligible_bidder`
+  means nobody else needed the freed unit. `rounds` and `round_award_statuses` give the detail.
 
 ## Persistence and provenance
 

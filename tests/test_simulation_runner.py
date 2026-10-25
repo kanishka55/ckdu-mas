@@ -101,7 +101,7 @@ class SimulationRunnerConfigurationTests(unittest.TestCase):
             "hotspot_screening": "screening_outputs_recorded",
             "hotspot_agent": "processed_risk_records",
             "alert_decisions": "processed_typed_risk_and_hotspot_messages",
-            "contract_net": "single_round_per_completed_month",
+            "contract_net": "bounded_rounds_per_completed_month",
         }
         months = [
             {"status": "complete", "risk_delivery": "complete",
@@ -119,7 +119,7 @@ class SimulationRunnerConfigurationTests(unittest.TestCase):
             "hotspot_screening": "screening_outputs_recorded",
             "hotspot_agent": "processed_risk_records",
             "alert_decisions": "processed_typed_risk_and_hotspot_messages",
-            "contract_net": "single_round_per_completed_month",
+            "contract_net": "bounded_rounds_per_completed_month",
         }
         complete_month = {"status": "complete", "risk_delivery": "complete",
                           "hotspot_screening": "complete", "alert_decisions": "complete",
@@ -147,7 +147,7 @@ class SimulationRunnerConfigurationTests(unittest.TestCase):
             "hotspot_screening": "screening_outputs_recorded",
             "hotspot_agent": "processed_risk_records",
             "alert_decisions": "processed_typed_risk_and_hotspot_messages",
-            "contract_net": "single_round_per_completed_month",
+            "contract_net": "bounded_rounds_per_completed_month",
         }
         month_status = [{
             "status": "complete", "risk_delivery": "complete",
@@ -262,7 +262,14 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertTrue(all(month["contract_net"] != "pending" for month in result["month_status"]))
             self.assertEqual(result["month_status"][0]["hotspot_screening"], "expected_warmup")
             self.assertEqual(result["month_status"][0]["alert_decisions"], "expected_warmup")
-            self.assertEqual(result["evaluation_status"]["allocation_efficiency"]["status"], "unavailable")
+            # Baselines and the need-gated WQI risk weight are supplied by the runner, so the
+            # allocation comparison is available (run totals are the last rows per metric).
+            self.assertNotIn("allocation_efficiency", result["evaluation_status"])
+            for metric in ("risk_weighted_population_served", "contract_net_minus_equal_split",
+                           "contract_net_minus_first_come"):
+                self.assertEqual(result["evaluation_status"][metric]["status"], "ok")
+            self.assertEqual(result["allocation_evidence"]["baselines_supplied"],
+                             ["equal_split", "first_come"])
             self.assertEqual(result["evaluation_status"]["risk_classification_alignment"]["status"],
                              "unavailable")
             self.assertEqual(result["stage_status"]["hotspot_agent"], "processed_risk_records")
@@ -438,7 +445,7 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
                 "trigger_tiers": ["Poor", "Unsuitable", "Very Poor"],
                 "consecutive_months": 2,
             })
-            self.assertEqual(manifest["evaluation_status"]["allocation_efficiency"]["status"], "unavailable")
+            self.assertEqual(manifest["evaluation_status"]["risk_weighted_population_served"]["status"], "ok")
             allocation_rows_path = output / "logs/allocations.csv"
             self.assertTrue(allocation_rows_path.is_file())
             with allocation_rows_path.open(newline="", encoding="utf-8") as stream:
@@ -446,14 +453,15 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
                 allocation_rows = list(allocation_reader)
             self.assertEqual(allocation_reader.fieldnames,
                              ["month", "resource", "ds_division", "round", "winning_bid", "method"])
-            self.assertTrue(all(row["method"] == "contract_net" for row in allocation_rows))
-            self.assertEqual(manifest["allocation_evidence"]["baselines_supplied"], [])
-            self.assertFalse(manifest["allocation_evidence"]["team_output_attestation"])
+            self.assertEqual({row["method"] for row in allocation_rows},
+                             {"contract_net", "equal_split", "first_come"})
+            self.assertEqual(manifest["allocation_evidence"]["baselines_supplied"],
+                             ["equal_split", "first_come"])
+            self.assertTrue(manifest["allocation_evidence"]["team_output_attestation"])
+            self.assertIn("not real-world", manifest["allocation_evidence"]["attestation_scope"])
+            self.assertIn("need-gated", manifest["allocation_evidence"]["risk_weight_definition"])
             self.assertTrue(manifest["allocation_evidence"]["population_source"])
-            allocation_missing = manifest["evaluation_status"]["allocation_efficiency"]["availability"]["missing_dependencies"]
-            self.assertNotIn("division population mapping", allocation_missing)
-            self.assertTrue(any("equal_split" in item and "first_come" in item
-                                for item in allocation_missing))
+            self.assertEqual(manifest["evaluation_status"]["contract_net_minus_equal_split"]["status"], "ok")
             self.assertEqual(manifest["evaluation_status"]["alert_latency"]["status"], "ok")
             with (output / "logs/evaluation_summary.csv").open(newline="", encoding="utf-8") as stream:
                 evaluation_rows = list(csv.DictReader(stream))
@@ -469,9 +477,12 @@ class EmbeddedMultiMonthSimulationTests(unittest.TestCase):
             self.assertEqual([(row["scope"], row["status"], row["value"])
                               for row in negotiation_rounds],
                              [("month_index=0", "ok", "1"), ("month_index=1", "ok", "1")])
+            # 11 cfp + 11 replies + accept/reject per proposer + 1 inform_done. Month 0: 4 proposers
+            # (1 accept, 3 reject) = 27. Month 1: month 0's winner already holds the RO unit and
+            # refuses, so 3 proposers (1 accept, 2 reject) = 26.
             self.assertEqual([(row["scope"], row["status"], row["value"])
                               for row in negotiation_messages],
-                             [("month_index=0", "ok", "27"), ("month_index=1", "ok", "27")])
+                             [("month_index=0", "ok", "27"), ("month_index=1", "ok", "26")])
             self.assertNotIn("password", manifest["configuration"])
             self.assertTrue(all(event["event"] in {"started", "stopped"}
                                 for event in manifest["agent_lifecycle"]))

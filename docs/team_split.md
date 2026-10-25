@@ -35,7 +35,10 @@ because it breaks everyone's agents at once.
 
 ---
 
-## 1. Member A — Data layer, WellMonitorAgent, VillageAgent
+## 1. Member A — Data layer, ClockAgent, WellMonitorAgent
+
+Ownership changed on 2026-10-25 by team agreement: agents are split in message-flow order, so A
+owns the first two agents (ClockAgent, WellMonitorAgent) and VillageAgent moved to Member C.
 
 Brief: [`docs/tasks/member_a_data_and_villages.md`](tasks/member_a_data_and_villages.md) · Branch: `feat/a-data`
 
@@ -48,9 +51,9 @@ Brief: [`docs/tasks/member_a_data_and_villages.md`](tasks/member_a_data_and_vill
   `need = risk × population / distance_to_depot`. Current version (2026-10-17):
   `bid(risk, population) = risk × population`, bid only when tier is Poor or worse; distance is the
   coordinator's delivery cost. See `docs/data_assumptions.md`.
-- `src/agents/well_monitor.py` — WellMonitorAgent: ingests monthly readings per village.
-- `src/agents/village.py` — VillageAgent (10–15 instances): holds local well data, computes its bid,
-  replies to CFPs with propose/refuse.
+- `src/agents/clock.py` — ClockAgent: broadcasts the simulated "new month" tick (month, season).
+- `src/agents/well_monitor.py` — WellMonitorAgent: on each tick, sends each village's readings.
+- `src/core/bidding.py` stays with A: the bid formula C's VillageAgent calls.
 
 **Must deliver in week 1–2**
 
@@ -64,8 +67,9 @@ Brief: [`docs/tasks/member_a_data_and_villages.md`](tasks/member_a_data_and_vill
 3. Disclose `RHO = 0.6` (the assumed inter-parameter correlation in `src/generate_synthetic_wells.py`)
    as an unpublished assumption — it belongs in the methodology section, not buried in the script.
 
-**Interface you publish to the others:** the well-reading frame columns, and the `bid(...)` signature.
-B consumes your frames; C consumes your bids.
+**Interface you publish to the others:** the `month_tick` and `well_readings` messages, the
+well-reading frame columns, and the `bid(...)` / `has_need(...)` signatures.
+B consumes your readings; C's VillageAgent and runner consume your ticks and bid function.
 
 ---
 
@@ -121,8 +125,9 @@ This is the core MAS demonstration and the part the course grades hardest.
   Protocol: `cfp` → `propose` / `refuse` → `accept-proposal` / `reject-proposal` → `inform` / `failure`.
 - `src/core/allocation.py` — pure allocation logic plus the two **baselines to compare against**:
   equal split, and first-come-first-served.
-- `src/sim/runner.py` — the simulation runner: wires ClockAgent ticks to monthly negotiation rounds.
-- `src/agents/clock.py` — ClockAgent broadcasting the simulated "new month" tick.
+- `src/agents/village.py` — VillageAgent (11 instances, moved from A on 2026-10-25): holds its own
+  village data, decides propose/refuse on each CFP using A's `bid()`/`has_need()`, confirms or fails awards.
+- `src/sim/runner.py` — the simulation runner: wires A's ClockAgent ticks to monthly negotiation rounds.
 - Scarcity configuration: the pool of RO units and bowsers **must be genuinely scarce** — fewer
   resources than high-risk villages, or the negotiation is theatre and there is nothing to evaluate.
 
@@ -187,7 +192,7 @@ hand-written `logs/messages.csv`. Stubs are replaced with real calls at the week
 |---|---|---|---|---|
 | 1–2 | fill `ckdu_03` blanks, pin requirements | close `TO_FILL` + parameter gap | toy Contract Net demo | ontology, logger |
 | 3–4 | loaders, well schema | WQI draft + tests | CFP state machine | alert text drafts |
-| 5–6 | WellMonitorAgent, VillageAgent | RiskScoringAgent | scarcity model, baselines | AlertAgent |
+| 5–6 | ClockAgent, WellMonitorAgent | RiskScoringAgent | VillageAgent, scarcity model, baselines | AlertAgent |
 | 7–8 | bid function tuning | HotspotAgent | full negotiation, 10–15 villages | evaluation script |
 | 9 | integration | integration | integration | integration lead |
 | 10 | — | validate vs `ckdu_05` | efficiency vs baselines | metrics write-up |

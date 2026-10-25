@@ -42,9 +42,19 @@ Baselines to compare against: equal split and first-come-first-served allocation
   - well monitor demo (ticks -> readings -> villages): `python -m src.sim.demo_well_monitor --embedded-server`
   - F1 -> F2 chain (real WellMonitor -> RiskScoring -> villages + F3 stand-in):
     `python -m src.sim.demo_f1_f2 --embedded-server` (writes logs/risk_scores.csv, logs/well_scores.csv)
-  - run simulation:
+  - run simulation (all agents, 12 months, fresh output dir each time):
+    `python -m src.sim.runner --end-month-index 11 --calendar-months 10,11,12,1,2,3,4,5,6,7,8,9
+    --output-dir <new dir> --resource-pool 3 --hotspot-trigger-tier Poor --hotspot-consecutive-months 2
+    --simulate-delivery-failure Talawa:0 --embedded-server` (see docs/simulation_runner.md)
+  - opt-in SPADE integration tests: set CKDU_RUN_SPADE_ALERT/HOTSPOT/INTEGRATION/SIMULATION=1, then `pytest`
   - tests: `pytest`
-  - dashboard:
+  - dashboard (shows one simulation run's results in the browser):
+    1. run the simulation above with e.g. `--output-dir C:\ckdu-runs\run-01`
+    2. `$env:CKDU_SIMULATION_RUN_DIR = "C:\ckdu-runs\run-01"` (the same folder; Agent Monitor and
+       Live Coordination views) and `$env:CKDU_LOGS_DIR = "C:\ckdu-runs\run-01\logs"` (Team outputs
+       view; without it that view reads the project's own logs/, which the runner never writes)
+    3. `streamlit run dashboard/app.py`, then open http://localhost:8501
+    Views at the top: Team outputs, Agent Monitor, Live Coordination, Simulation Lab (can start runs itself).
   - risk map (Function 2, animated): `python -m src.sim.demo_risk_scoring --embedded-server --months all`,
     then `streamlit run dashboard/risk_map.py`
 
@@ -77,7 +87,7 @@ Baselines to compare against: equal split and first-come-first-served allocation
 - Show the command you ran and its output, not just a claim that it works.
 
 ## Team workflow
-- Per-member task briefs: docs/tasks/README.md (A: data/villages, B: risk/hotspot,
-  C: Contract Net, D: alerts/eval/dashboard). Overview and timeline: docs/team_split.md.
+- Per-member task briefs: docs/tasks/README.md (A: data, Clock + WellMonitor agents;
+  B: risk/hotspot; C: Village + Coordinator agents, Contract Net; D: alerts/eval/dashboard). Overview and timeline: docs/team_split.md.
 - Four people, one branch per person, small commits, pull before starting.
 - Keep this file under 200 lines. Move detail to docs/.

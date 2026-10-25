@@ -47,9 +47,6 @@ class SimulationLabTests(unittest.TestCase):
     def tearDown(self):
         for run_id in set(simulation_lab._PROCESSES) - self.previous_processes:
             simulation_lab._PROCESSES.pop(run_id, None)
-            handle = simulation_lab._PROCESS_LOG_HANDLES.pop(run_id, None)
-            if handle is not None:
-                handle.close()
 
     def test_existing_sample_schema_and_provenance_validate(self):
         validated = validate_input_bytes(SAMPLE_INPUT.read_bytes())

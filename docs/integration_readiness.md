@@ -67,15 +67,16 @@ all team components pass end to end.
   does not supply a sourced, approved division-to-WQI-tier mapping. A mapping
   must be independently sourced and approved; model predictions cannot serve
   as their own reference labels.
-- The runner exports only confirmed Contract Net awards to the evaluator's
-  existing schema: `month,resource,ds_division,round,winning_bid,method`.
-  Calendar `month` comes from the explicitly configured mapping. The manifest
-  labels these as synthetic run artifacts and records that no baselines or
-  team-output attestation were supplied. Population is taken from the
-  configured division input when present; comparisons remain unavailable until
-  comparable equal-split and first-come rows, required risk-weight inputs, and
-  an approved risk-weight definition are supplied. This export is not Member
-  C's output or a scientific result.
+- The runner exports confirmed Contract Net awards (all rounds) **and** `equal_split` /
+  `first_come` baseline rows to the evaluator's schema:
+  `month,resource,ds_division,round,winning_bid,method` (2026-10-25). Calendar `month`
+  comes from the explicitly configured mapping. The risk weight is the need-gated village
+  WQI (`src/core/allocation.py`, a project definition, not a published weight), so the
+  allocation comparison is now available per month and as run totals. The manifest's
+  `allocation_evidence.attestation_scope` states the limit: the rows were produced by this run
+  from synthetic input, which is not real-world or scientific validation. The risk-weight
+  definition still needs team sign-off before it goes in the report (see
+  `docs/simulation_runner.md`, "Baselines and the allocation comparison").
 - The dashboard keeps three sources separate: verified team output files,
   labelled illustrative test fixtures, and the generated local-demo bundle
   selected through `CKDU_DEMO_OUTPUT_DIR`. Missing or malformed files produce

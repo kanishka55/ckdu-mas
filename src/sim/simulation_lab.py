@@ -28,7 +28,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_INPUT = ROOT / "data/processed/synthetic_wells.csv"
 INPUT_COLUMNS = tuple(column for column in wells.READING_COLUMNS if column != "month")
 _PROCESSES: dict[str, subprocess.Popen[Any]] = {}
-_PROCESS_LOG_HANDLES: dict[str, Any] = {}
 _PROCESS_LOCK = threading.Lock()
 HOTSPOT_TRIGGER_TIERS = tuple(sorted(KNOWN_TIERS - {"Unknown"}))
 
@@ -272,10 +271,6 @@ def _resolve_run_state(record: Mapping[str, Any], root: Path) -> dict[str, Any]:
     with _PROCESS_LOCK:
         process = _PROCESSES.get(run_id)
         return_code = process.poll() if process is not None else None
-        if return_code is not None:
-            log_handle = _PROCESS_LOG_HANDLES.pop(run_id, None)
-            if log_handle is not None:
-                log_handle.close()
     manifest_state, manifest_error = _manifest_status(run_dir)
     if manifest_state == "completed":
         status, error = "completed", None
@@ -415,12 +410,12 @@ def launch_simulation(lab_root: str | Path, settings: SimulationSettings, *,
         command = build_runner_command(settings, input_path=selected_input,
                                        output_path=run_dir, run_id=run_id)
         try:
-            log_handle = log_path.open("xb")
-            process = popen_factory(command, cwd=ROOT, stdout=log_handle,
-                                    stderr=subprocess.STDOUT, start_new_session=True)
+            # The child inherits its own handle; closing ours right away keeps the dashboard from
+            # leaking handles and lets Windows delete the run directory later.
+            with log_path.open("xb") as log_handle:
+                process = popen_factory(command, cwd=ROOT, stdout=log_handle,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
         except Exception as exc:
-            if "log_handle" in locals():
-                log_handle.close()
             state.update(status="failed", error=f"Could not start runner: {type(exc).__name__}: {exc}")
             _write_json_atomic(control_path, state)
             raise RuntimeError(state["error"]) from exc
@@ -428,7 +423,6 @@ def launch_simulation(lab_root: str | Path, settings: SimulationSettings, *,
         _write_json_atomic(control_path, state)
         with _PROCESS_LOCK:
             _PROCESSES[run_id] = process
-            _PROCESS_LOG_HANDLES[run_id] = log_handle
         return _resolve_run_state(state, root)
 
 

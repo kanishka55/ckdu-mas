@@ -5,7 +5,7 @@
 sampling-design file, a run-local risk-record collector, `HotspotAgent`, `AlertProcessingAgent`,
 `AlertInboxAgent`, and `ClockAgent`. For each tick, the runner
 waits for the monitor, scorer, collector, and every village to show current-month state before it
-starts the existing single-round `ResourceCoordinatorAgent`. If current-month risk delivery is
+starts the `ResourceCoordinatorAgent` (one per round; see below). If current-month risk delivery is
 incomplete, that month's Contract Net round is skipped; the runner does not allow villages to bid
 from stale risk.
 
@@ -15,6 +15,45 @@ calendar mapping is supplied explicitly using one calendar label per simulated `
 `month` field in `month_tick` is a 1–12 calendar month and `month_index` is the simulation counter.
 Neither is derived from the other by the runner. The source seasonal values are expanded using the
 existing `wells.expand_to_months` behavior; repeated seasonal rows are not new monthly measurements.
+
+## Full 12-month run
+
+```
+python -m src.sim.runner --end-month-index 11 --calendar-months 10,11,12,1,2,3,4,5,6,7,8,9   --output-dir <new empty dir> --resource-pool 3   --hotspot-trigger-tier Poor --hotspot-consecutive-months 2   --simulate-delivery-failure Talawa:0 --embedded-server
+```
+Drop `--embedded-server` to use an external `spade run --host localhost --memory`. Options added on
+2026-10-25:
+- `--max-rounds N` (default 3): extra CFP rounds in a month only re-offer units freed by a `failure`
+  or an unconfirmed award. `1` gives the old single-round behaviour.
+- `--simulate-delivery-failure DIVISION:MONTH_INDEX` (repeatable): a **simulated scenario** in which that
+  village answers its award with `failure`, to exercise re-offer. It is recorded in
+  `run_manifest.json` under `configuration.simulated_delivery_failures`.
+
+Contract Net behaviour (re-offer, RO carry-over, statuses) is described in
+`docs/contract_net_coordinator.md`. The `contract_net` stage value is now
+`bounded_rounds_per_completed_month`.
+
+## Baselines and the allocation comparison
+
+The runner writes `logs/allocations.csv` with three methods for every month the Contract Net ran:
+`contract_net` (confirmed awards from all rounds), and `equal_split` and `first_come` computed by
+`src/core/allocation.py`. Both baselines use the same pool and the same durable-unit rule (each method
+keeps its own RO holdings), and both skip a village that cannot take delivery that month.
+- `equal_split` ignores risk: a round-robin over villages in name order, continuing month to month.
+- `first_come` serves villages that have a need (tier Poor or worse) in the order their round-1
+  replies reached the coordinator, taken from the message log. In one process the coordinator
+  sends CFPs in name order and the replies arrive in that order, so in practice this is close to
+  alphabetical.
+
+Risk weight for "risk-weighted population served" = **need-gated village WQI**: the WQI if the tier
+is Poor or worse, else 0 (`allocation.risk_weight`). Plain WQI was tried first and rejected: it let
+equal split "win" by serving large Good-tier villages (e.g. Kandy) that had no need. This is a
+project definition, not a published weight.
+
+The runner attests (`evaluated_month_resources`) that every method was computed for each Contract Net
+month, so a method that placed no unit in a month scores 0 instead of `unavailable`. The evaluator
+also reports **run totals** (scope `all;resource=...`). For durable RO units the totals are the
+meaningful comparison: after the first months the Contract Net correctly places nothing new.
 
 ## Run status and evaluation availability
 

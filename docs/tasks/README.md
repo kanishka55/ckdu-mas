@@ -6,10 +6,13 @@ commands, and prompts that work in Claude Code.
 
 | Member | Brief | Branch | Owns |
 |---|---|---|---|
-| **A** | [member_a_data_and_villages.md](member_a_data_and_villages.md) | `feat/a-data` | `data/`, loaders, well schema, bidding, WellMonitorAgent, VillageAgent |
+| **A** | [member_a_data_and_villages.md](member_a_data_and_villages.md) | `feat/a-data` | `data/`, loaders, well schema, bidding, ClockAgent, WellMonitorAgent |
 | **B** | [member_b_risk_and_hotspot.md](member_b_risk_and_hotspot.md) | `feat/b-risk` | WQI, risk tiers, RiskScoringAgent, HotspotAgent |
-| **C** | [member_c_contract_net.md](member_c_contract_net.md) | `feat/c-contractnet` | Contract Net, ResourceCoordinatorAgent, ClockAgent, allocation baselines |
+| **C** | [member_c_contract_net.md](member_c_contract_net.md) | `feat/c-contractnet` | Contract Net, VillageAgent, ResourceCoordinatorAgent, allocation baselines |
 | **D** | [member_d_alerts_eval_dashboard.md](member_d_alerts_eval_dashboard.md) | `feat/d-integration` | ontology, message log, AlertAgent, evaluation, dashboard, report |
+
+Agent ownership follows the message flow (team agreement, 2026-10-25): A = Clock, WellMonitor;
+B = RiskScoring, Hotspot; C = Village, ResourceCoordinator; D = Alert, evaluation, dashboard.
 
 How the four fit together, the shared week-1 foundation and the full timeline:
 **[../team_split.md](../team_split.md)**. Permanent rules: `CLAUDE.md`. Background: `../project_plan.md`.
